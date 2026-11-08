@@ -42,6 +42,19 @@ static unsigned cur_w = 1280, cur_h = 720;
 static uint32_t *frame; /* top down, XRGB8888 */
 static bool have_frame;
 
+/* Sound: the game's OpenAL (openal-soft) writes a WAV stream to a FIFO
+ * through its "wave" backend, at RetroArch's rate; the core passes it on */
+static char audio_fifo[128], audio_conf[128];
+static int audio_fd = -1;
+static bool audio_header_done;
+static uint8_t audio_header[256];
+static size_t audio_header_len;
+#define AUDIO_RING (SAMPLE_RATE / 2) /* frames, half a second */
+static int16_t audio_ring[AUDIO_RING * 2];
+static size_t audio_frames;
+static uint8_t audio_partial[4];
+static size_t audio_partial_len;
+
 static void logf_(enum retro_log_level level, const char *fmt, ...)
 {
     char buf[1024];
@@ -259,6 +272,116 @@ static void destroy_shared(void)
     }
 }
 
+/* ---- Sound ---- */
+
+static bool setup_audio(void)
+{
+    snprintf(audio_fifo, sizeof(audio_fifo), "/tmp/atarivcs-%d.pcm", (int)getpid());
+    snprintf(audio_conf, sizeof(audio_conf), "/tmp/atarivcs-%d.alsoft.conf", (int)getpid());
+    unlink(audio_fifo);
+    if (mkfifo(audio_fifo, 0600) != 0) {
+        LOG_E("atarivcs: mkfifo %s: %s\n", audio_fifo, strerror(errno));
+        audio_fifo[0] = '\0';
+        return false;
+    }
+    /* Open for reading first, so the game's open for writing does not wait */
+    audio_fd = open(audio_fifo, O_RDONLY | O_NONBLOCK);
+    FILE *f = fopen(audio_conf, "w");
+    if (audio_fd < 0 || !f) {
+        if (f)
+            fclose(f);
+        LOG_E("atarivcs: sound FIFO not usable\n");
+        return false;
+    }
+    fprintf(f, "[general]\ndrivers = wave\nfrequency = %d\nchannels = stereo\nsample-type = int16\n"
+               "[wave]\nfile = %s\n", SAMPLE_RATE, audio_fifo);
+    fclose(f);
+    audio_header_done = false;
+    audio_header_len = 0;
+    audio_frames = 0;
+    audio_partial_len = 0;
+    return true;
+}
+
+static void close_audio(void)
+{
+    if (audio_fd >= 0) {
+        close(audio_fd);
+        audio_fd = -1;
+    }
+    if (audio_fifo[0]) {
+        unlink(audio_fifo);
+        audio_fifo[0] = '\0';
+    }
+    if (audio_conf[0]) {
+        unlink(audio_conf);
+        audio_conf[0] = '\0';
+    }
+}
+
+/* Samples into the ring; past the WAV header ("data" and its size) first */
+static void take_audio_bytes(const uint8_t *p, size_t n)
+{
+    if (!audio_header_done) {
+        while (n && audio_header_len < sizeof(audio_header)) {
+            audio_header[audio_header_len++] = *p++;
+            n--;
+            if (audio_header_len >= 8 && !memcmp(audio_header + audio_header_len - 8, "data", 4)) {
+                audio_header_done = true;
+                break;
+            }
+        }
+        if (!audio_header_done) {
+            if (audio_header_len == sizeof(audio_header))
+                audio_header_done = true; /* no header after all */
+            else
+                return;
+        }
+    }
+    while (n) {
+        size_t take = 4 - audio_partial_len < n ? 4 - audio_partial_len : n;
+        memcpy(audio_partial + audio_partial_len, p, take);
+        audio_partial_len += take;
+        p += take;
+        n -= take;
+        if (audio_partial_len < 4)
+            break;
+        audio_partial_len = 0;
+        if (audio_frames == AUDIO_RING) {
+            /* Too far ahead: the oldest goes */
+            memmove(audio_ring, audio_ring + 2, (AUDIO_RING - 1) * 2 * sizeof(int16_t));
+            audio_frames--;
+        }
+        memcpy(&audio_ring[audio_frames * 2], audio_partial, 4);
+        audio_frames++;
+    }
+}
+
+/* One frame's worth to RetroArch: what the game played, silence where it
+ * has not (yet) */
+static void play_audio(void)
+{
+    enum { PER_RUN = SAMPLE_RATE / FPS };
+    static int16_t out[PER_RUN * 2];
+    if (audio_fd >= 0) {
+        uint8_t buf[16384];
+        ssize_t got;
+        while ((got = read(audio_fd, buf, sizeof(buf))) > 0)
+            take_audio_bytes(buf, (size_t)got);
+    }
+    /* Latency: no more than a few frames queued */
+    while (audio_frames > PER_RUN * 6) {
+        memmove(audio_ring, audio_ring + PER_RUN * 2, (audio_frames - PER_RUN) * 2 * sizeof(int16_t));
+        audio_frames -= PER_RUN;
+    }
+    size_t n = audio_frames < PER_RUN ? audio_frames : PER_RUN;
+    memcpy(out, audio_ring, n * 2 * sizeof(int16_t));
+    memset(out + n * 2, 0, (PER_RUN - n) * 2 * sizeof(int16_t));
+    memmove(audio_ring, audio_ring + n * 2, (audio_frames - n) * 2 * sizeof(int16_t));
+    audio_frames -= n;
+    audio_batch_cb(out, PER_RUN);
+}
+
 /* ---- The game ---- */
 
 static void stop_child(void)
@@ -326,9 +449,11 @@ bool retro_load_game(const struct retro_game_info *game)
 
     if (!create_shared())
         return false;
+    bool have_audio = setup_audio();
     frame = calloc((size_t)ATARIVCS_MAX_WIDTH * ATARIVCS_MAX_HEIGHT, 4);
     if (!frame) {
         destroy_shared();
+        close_audio();
         return false;
     }
 
@@ -346,6 +471,7 @@ bool retro_load_game(const struct retro_game_info *game)
     if (child < 0) {
         LOG_E("atarivcs: fork: %s\n", strerror(errno));
         destroy_shared();
+        close_audio();
         return false;
     }
     if (child == 0) {
@@ -353,6 +479,10 @@ bool retro_load_game(const struct retro_game_info *game)
         if (chdir(dir) != 0)
             _exit(127);
         setenv("ATARIVCS_SHM", shm_name, 1);
+        if (have_audio) {
+            setenv("ALSOFT_CONF", audio_conf, 1);
+            setenv("ALSOFT_DRIVERS", "wave", 1);
+        }
 #if defined(__x86_64__)
         setenv("LD_PRELOAD", shim, 1);
         if (script)
@@ -385,6 +515,7 @@ void retro_unload_game(void)
 {
     stop_child();
     destroy_shared();
+    close_audio();
     free(frame);
     frame = NULL;
     have_frame = false;
@@ -567,7 +698,5 @@ void retro_run(void)
 
     dump_frame_if_asked();
 
-    /* The game plays its own sound; silence keeps RetroArch's timing */
-    static int16_t silence[SAMPLE_RATE / FPS * 2];
-    audio_batch_cb(silence, SAMPLE_RATE / FPS);
+    play_audio();
 }

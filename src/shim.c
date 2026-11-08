@@ -200,76 +200,133 @@ EXPORT int XGrabPointer(void *dpy, unsigned long w, int owner, unsigned int mask
 }
 
 
-/* ---- Focus: RetroArch's window has it, the game's never does. Games that
- * stop while they are not focused (Bloo Kid waits in XNextEvent) are told
- * they have it: one FocusIn for each window they map, their FocusOut
- * dropped. ---- */
+/* ---- The game's window. It is not mapped: the picture comes to RetroArch,
+ * and the window would only stand beside it (ATARIVCS_SHOW_WINDOW=1 maps it
+ * anyway). The game is told it was - MapNotify, Expose - and that it has the
+ * focus, which RetroArch's window has: games that stop while not focused
+ * (Bloo Kid waits in XNextEvent) go on. Its FocusOut events are dropped. ---- */
 
-typedef struct {
-    int type;
-    unsigned long serial;
-    int send_event;
-    void *display;
-    unsigned long window;
-    int mode;
-    int detail;
-} focus_event;
+#define XEVENT_SIZE 192 /* sizeof(XEvent) on x86-64 */
+#define MapNotify 19
+#define Expose 12
 #define FocusIn 9
 #define FocusOut 10
-#define NotifyNormal 0
 #define NotifyNonlinear 3
 
-static unsigned long focus_window;
-static int focus_owed;
+typedef struct { int type; unsigned long serial; int send_event; void *display; unsigned long window; } any_event;
+typedef struct { int type; unsigned long serial; int send_event; void *display; unsigned long event, window; int override_redirect; } map_event;
+typedef struct { int type; unsigned long serial; int send_event; void *display; unsigned long window; int x, y, width, height, count; } expose_event;
+typedef struct { int type; unsigned long serial; int send_event; void *display; unsigned long window; int mode, detail; } focus_event;
 
-EXPORT int XMapWindow(void *dpy, unsigned long w)
+static union { char bytes[XEVENT_SIZE]; long align; } owed[8];
+static int owed_count;
+
+static void owe(int type, void *dpy, unsigned long w)
 {
-    static int (*real)(void *, unsigned long);
-    if (!real)
-        real = next("XMapWindow");
-    focus_window = w;
-    focus_owed = 1;
-    return real ? real(dpy, w) : 0;
+    if (owed_count == (int)(sizeof(owed) / sizeof(owed[0])))
+        return;
+    void *ev = owed[owed_count++].bytes;
+    memset(ev, 0, XEVENT_SIZE);
+    if (type == MapNotify) {
+        map_event *m = ev;
+        m->event = w;
+        m->window = w;
+    } else if (type == Expose) {
+        ((expose_event *)ev)->window = w;
+    } else {
+        focus_event *f = ev;
+        f->window = w;
+        f->detail = NotifyNonlinear;
+    }
+    any_event *a = ev;
+    a->type = type;
+    a->send_event = 1;
+    a->display = dpy;
 }
 
-EXPORT int XMapRaised(void *dpy, unsigned long w)
+static void pop_owed(int i, void *out)
 {
-    static int (*real)(void *, unsigned long);
-    if (!real)
-        real = next("XMapRaised");
-    focus_window = w;
-    focus_owed = 1;
-    return real ? real(dpy, w) : 0;
+    memcpy(out, owed[i].bytes, XEVENT_SIZE);
+    memmove(&owed[i], &owed[i + 1], (size_t)(owed_count - i - 1) * sizeof(owed[0]));
+    owed_count--;
 }
 
-static int owe_focus(void *dpy, void *ev)
+static int show_window(void)
 {
-    if (!focus_owed)
-        return 0;
-    focus_owed = 0;
-    focus_event *f = ev;
-    memset(ev, 0, 192); /* sizeof(XEvent) */
-    f->type = FocusIn;
-    f->send_event = 1;
-    f->display = dpy;
-    f->window = focus_window;
-    f->mode = NotifyNormal;
-    f->detail = NotifyNonlinear;
+    const char *v = getenv("ATARIVCS_SHOW_WINDOW");
+    return v && *v == '1';
+}
+
+static int map_window(const char *name, void *dpy, unsigned long w)
+{
+    if (show_window()) {
+        int (*real)(void *, unsigned long) = next(name);
+        owe(FocusIn, dpy, w);
+        return real ? real(dpy, w) : 0;
+    }
+    owe(MapNotify, dpy, w);
+    owe(Expose, dpy, w);
+    owe(FocusIn, dpy, w);
     return 1;
 }
+
+EXPORT int XMapWindow(void *dpy, unsigned long w) { return map_window("XMapWindow", dpy, w); }
+EXPORT int XMapRaised(void *dpy, unsigned long w) { return map_window("XMapRaised", dpy, w); }
 
 EXPORT int XNextEvent(void *dpy, void *ev)
 {
     static int (*real)(void *, void *);
     if (!real)
         real = next("XNextEvent");
-    if (owe_focus(dpy, ev))
+    if (owed_count) {
+        pop_owed(0, ev);
         return 0;
+    }
     for (;;) {
         int r = real(dpy, ev);
-        if (((focus_event *)ev)->type != FocusOut)
+        if (((any_event *)ev)->type != FocusOut)
             return r;
     }
+}
+
+EXPORT int XPeekEvent(void *dpy, void *ev)
+{
+    static int (*real)(void *, void *);
+    if (!real)
+        real = next("XPeekEvent");
+    if (owed_count) {
+        memcpy(ev, owed[0].bytes, XEVENT_SIZE);
+        return 0;
+    }
+    return real ? real(dpy, ev) : 0;
+}
+
+typedef int (*predicate_fn)(void *, void *, char *);
+
+EXPORT int XPeekIfEvent(void *dpy, void *ev, predicate_fn pred, char *arg)
+{
+    static int (*real)(void *, void *, predicate_fn, char *);
+    if (!real)
+        real = next("XPeekIfEvent");
+    for (int i = 0; i < owed_count; i++)
+        if (pred(dpy, owed[i].bytes, arg)) {
+            memcpy(ev, owed[i].bytes, XEVENT_SIZE);
+            return 0;
+        }
+    return real ? real(dpy, ev, pred, arg) : 0;
+}
+
+EXPORT int XIfEvent(void *dpy, void *ev, predicate_fn pred, char *arg)
+{
+    static int (*real)(void *, void *, predicate_fn, char *);
+    if (!real)
+        real = next("XIfEvent");
+    for (int i = 0; i < owed_count; i++)
+        if (pred(dpy, owed[i].bytes, arg)) {
+            pop_owed(i, ev);
+            return 0;
+        }
+    return real ? real(dpy, ev, pred, arg) : 0;
 }
 
 EXPORT int XPending(void *dpy)
@@ -277,7 +334,7 @@ EXPORT int XPending(void *dpy)
     static int (*real)(void *);
     if (!real)
         real = next("XPending");
-    return focus_owed + (real ? real(dpy) : 0);
+    return owed_count + (real ? real(dpy) : 0);
 }
 
 EXPORT int XEventsQueued(void *dpy, int mode)
@@ -285,7 +342,7 @@ EXPORT int XEventsQueued(void *dpy, int mode)
     static int (*real)(void *, int);
     if (!real)
         real = next("XEventsQueued");
-    return focus_owed + (real ? real(dpy, mode) : 0);
+    return owed_count + (real ? real(dpy, mode) : 0);
 }
 
 /* ---- The pad: one SDL joystick, the core's ---- */

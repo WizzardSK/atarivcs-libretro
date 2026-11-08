@@ -2,9 +2,9 @@
 
 A libretro core for the native games of the Atari VCS (2021) store: Linux x86-64 programs. The core starts the game as a child process (directly on x86-64, through [box64](https://github.com/ptitSeb/box64) elsewhere) with a small library preloaded into it, which hands each frame the game draws to the core and gives the game RetroArch's pad as an SDL joystick. So a game is played with whatever RetroArch maps to its RetroPad, the keyboard included.
 
-Prototype. Bloo Kid (X11, GLX, SDL joystick) runs in RetroArch on the aarch64 Chromebook through box64: its picture in RetroArch, at RetroArch's pace, and the RetroPad driving its menus. Unity games, sound through RetroArch and hiding the game's own window are not done yet. The game plays its own sound; savestates and rewind cannot work, and while RetroArch is paused the game slows to 10 fps rather than stopping.
+Prototype. Bloo Kid (X11, GLX, SDL joystick) runs in RetroArch on the aarch64 Chromebook through box64: its picture in RetroArch, at RetroArch's pace, and the RetroPad driving its menus. Its window is not shown (the game is told it was mapped and focused; `ATARIVCS_SHOW_WINDOW=1` shows it). OpenAL games (openal-soft) play through RetroArch: the core points the game's OpenAL at a FIFO with openal-soft's wave backend and passes the stream on. Unity games are not done yet. Savestates and rewind cannot work, and while RetroArch is paused the game slows to 10 fps rather than stopping.
 
-What the shim does to the game: it reads the back buffer at each `glXSwapBuffers`, waits there for RetroArch's next frame, answers SDL's joystick calls with the RetroPad, leaves keyboard and pointer grabs undone (RetroArch keeps the keyboard), and tells the game it has the focus (a `FocusIn` when its window is mapped, its `FocusOut` dropped) - Bloo Kid stops while it is not focused.
+What the shim does to the game: it reads the back buffer at each `glXSwapBuffers`, waits there for RetroArch's next frame, answers SDL's joystick calls with the RetroPad, leaves keyboard and pointer grabs undone (RetroArch keeps the keyboard), does not map the game's window but hands the game a `MapNotify`, `Expose` and `FocusIn` for it, and drops its `FocusOut` - Bloo Kid stops while it is not focused.
 
 ## Debugging
 
