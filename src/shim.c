@@ -182,6 +182,94 @@ EXPORT int XGrabPointer(void *dpy, unsigned long w, int owner, unsigned int mask
 }
 
 
+/* ---- Focus: RetroArch's window has it, the game's never does. Games that
+ * stop while they are not focused (Bloo Kid waits in XNextEvent) are told
+ * they have it: one FocusIn for each window they map, their FocusOut
+ * dropped. ---- */
+
+typedef struct {
+    int type;
+    unsigned long serial;
+    int send_event;
+    void *display;
+    unsigned long window;
+    int mode;
+    int detail;
+} focus_event;
+#define FocusIn 9
+#define FocusOut 10
+#define NotifyNormal 0
+#define NotifyNonlinear 3
+
+static unsigned long focus_window;
+static int focus_owed;
+
+EXPORT int XMapWindow(void *dpy, unsigned long w)
+{
+    static int (*real)(void *, unsigned long);
+    if (!real)
+        real = next("XMapWindow");
+    focus_window = w;
+    focus_owed = 1;
+    return real ? real(dpy, w) : 0;
+}
+
+EXPORT int XMapRaised(void *dpy, unsigned long w)
+{
+    static int (*real)(void *, unsigned long);
+    if (!real)
+        real = next("XMapRaised");
+    focus_window = w;
+    focus_owed = 1;
+    return real ? real(dpy, w) : 0;
+}
+
+static int owe_focus(void *dpy, void *ev)
+{
+    if (!focus_owed)
+        return 0;
+    focus_owed = 0;
+    focus_event *f = ev;
+    memset(ev, 0, 192); /* sizeof(XEvent) */
+    f->type = FocusIn;
+    f->send_event = 1;
+    f->display = dpy;
+    f->window = focus_window;
+    f->mode = NotifyNormal;
+    f->detail = NotifyNonlinear;
+    return 1;
+}
+
+EXPORT int XNextEvent(void *dpy, void *ev)
+{
+    static int (*real)(void *, void *);
+    if (!real)
+        real = next("XNextEvent");
+    if (owe_focus(dpy, ev))
+        return 0;
+    for (;;) {
+        int r = real(dpy, ev);
+        if (((focus_event *)ev)->type != FocusOut)
+            return r;
+    }
+}
+
+EXPORT int XPending(void *dpy)
+{
+    static int (*real)(void *);
+    if (!real)
+        real = next("XPending");
+    return focus_owed + (real ? real(dpy) : 0);
+}
+
+EXPORT int XEventsQueued(void *dpy, int mode)
+{
+    static int (*real)(void *, int);
+    if (!real)
+        real = next("XEventsQueued");
+    return focus_owed + (real ? real(dpy, mode) : 0);
+}
+
 /* ---- The pad: one SDL joystick, the core's ---- */
 
 typedef struct { int dummy; } fake_joystick;
