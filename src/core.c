@@ -706,6 +706,27 @@ static void write_pad(void)
     shared->axes[ATARIVCS_AXIS_LT] = trigger(RETRO_DEVICE_ID_JOYPAD_L2);
     shared->axes[ATARIVCS_AXIS_RT] = trigger(RETRO_DEVICE_ID_JOYPAD_R2);
 
+    /* The mouse, and the ring: a turn of it is the right stick's X going
+     * once round, -32768 to 32767, and a turn moves the pointer 1280 */
+    static int ring_last;
+    static bool ring_seen;
+    const int ring = shared->axes[ATARIVCS_AXIS_RX];
+    int dx = input_state_cb(0, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_X);
+    if (ring_seen) {
+        int d = ring - ring_last;
+        if (d > 32768)
+            d -= 65536;
+        else if (d < -32768)
+            d += 65536;
+        dx += d * 1280 / 65536;
+        if (d * 1280 / 65536 != 0 || d == 0)
+            ring_last = ring;
+    } else {
+        ring_last = ring;
+    }
+    ring_seen = true;
+    shared->mouse_x += dx;
+
     /* What RetroArch handed over, a line per change, while finding why a
      * pad RetroArch configured never reached the game */
     static uint32_t last_buttons;
@@ -796,6 +817,7 @@ static void debug_press(void)
             { "a", RETRO_DEVICE_ID_JOYPAD_A }, { "b", RETRO_DEVICE_ID_JOYPAD_B },
             { "x", RETRO_DEVICE_ID_JOYPAD_X }, { "y", RETRO_DEVICE_ID_JOYPAD_Y },
             { "start", RETRO_DEVICE_ID_JOYPAD_START }, { "select", RETRO_DEVICE_ID_JOYPAD_SELECT },
+            { "mleft", 1000 }, { "mright", 1001 },
         };
         for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
             if (!strcmp(name, names[i].name)) {
@@ -813,6 +835,8 @@ static void debug_press(void)
     };
     switch (id) {
     /* the D-pad as write_pad gives it: the hat and the left stick */
+    case 1000: shared->mouse_x -= 16; break;
+    case 1001: shared->mouse_x += 16; break;
     case RETRO_DEVICE_ID_JOYPAD_UP: shared->hat |= ATARIVCS_HAT_UP; shared->axes[ATARIVCS_AXIS_LY] = -32767; break;
     case RETRO_DEVICE_ID_JOYPAD_DOWN: shared->hat |= ATARIVCS_HAT_DOWN; shared->axes[ATARIVCS_AXIS_LY] = 32767; break;
     case RETRO_DEVICE_ID_JOYPAD_LEFT: shared->hat |= ATARIVCS_HAT_LEFT; shared->axes[ATARIVCS_AXIS_LX] = -32767; break;

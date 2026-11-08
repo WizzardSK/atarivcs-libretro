@@ -7,7 +7,7 @@
 #include <stdint.h>
 
 #define ATARIVCS_MAGIC 0x53435641u /* "AVCS" */
-#define ATARIVCS_VERSION 2u
+#define ATARIVCS_VERSION 3u
 
 #define ATARIVCS_MAX_WIDTH 3840
 #define ATARIVCS_MAX_HEIGHT 2160
@@ -37,6 +37,11 @@ typedef struct atarivcs_shared {
     volatile int16_t axes[ATARIVCS_AXIS_COUNT];
     volatile uint8_t hat;
     uint8_t pad0[3];
+    /* Where the mouse pointer would be, x only and unbounded: the core adds
+     * RetroArch's mouse and the Classic Controller's ring turning (the right
+     * stick's X, an angle that wraps) to it, the shim moves the game's
+     * pointer by what it changed */
+    volatile int32_t mouse_x;
 
     /* One more each retro_run: the game's swaps wait for it (at most 100 ms),
      * so the game runs at RetroArch's pace - its window, behind RetroArch's,

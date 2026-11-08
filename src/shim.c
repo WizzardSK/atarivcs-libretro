@@ -323,6 +323,7 @@ EXPORT int XMapRaised(void *dpy, unsigned long w) { return map_window("XMapRaise
 
 #define KeyPress 2
 #define KeyRelease 3
+#define MotionNotify 6
 
 typedef struct {
     int type; unsigned long serial; int send_event; void *display; unsigned long window, root, subwindow, time;
@@ -348,6 +349,62 @@ static unsigned pad_keys_down(void)
     return down;
 }
 
+/* The pointer: x follows the core's mouse_x (RetroArch's mouse, the
+ * Classic Controller's ring), kept in the window; y stays low in it, where
+ * a paddle is */
+static int pointer_x = 640, pointer_y = 600;
+
+static void send_motion(void *dpy)
+{
+    static int32_t last;
+    static int started;
+    if (!shared)
+        return;
+    int32_t now = shared->mouse_x;
+    if (!started) {
+        last = now;
+        started = 1;
+        return;
+    }
+    if (now == last || owed_count == (int)(sizeof(owed) / sizeof(owed[0])))
+        return;
+    pointer_x += now - last;
+    last = now;
+    if (pointer_x < 0)
+        pointer_x = 0;
+    if (pointer_x > 1279)
+        pointer_x = 1279;
+    unsigned long (*root_of)(void *) = real_of("XDefaultRootWindow");
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    key_event *m = (key_event *)owed[owed_count++].bytes;
+    memset(m, 0, XEVENT_SIZE);
+    m->type = MotionNotify;
+    m->display = dpy;
+    m->window = game_window;
+    m->root = root_of ? root_of(dpy) : 0;
+    m->time = (unsigned long)ts.tv_sec * 1000 + (unsigned long)ts.tv_nsec / 1000000;
+    m->x = m->x_root = pointer_x;
+    m->y = m->y_root = pointer_y;
+    m->same_screen = 1; /* is_hint stays 0, in keycode's place */
+}
+
+EXPORT int XQueryPointer(void *dpy, unsigned long w, unsigned long *root, unsigned long *child, int *root_x,
+                         int *root_y, int *win_x, int *win_y, unsigned int *mask)
+{
+    int (*real)(void *, unsigned long, unsigned long *, unsigned long *, int *, int *, int *, int *, unsigned int *) =
+        real_of("XQueryPointer");
+    int r = real ? real(dpy, w, root, child, root_x, root_y, win_x, win_y, mask) : 1;
+    if (game_window) {
+        if (root_x) *root_x = pointer_x;
+        if (root_y) *root_y = pointer_y;
+        if (win_x) *win_x = pointer_x;
+        if (win_y) *win_y = pointer_y;
+        if (child) *child = 0;
+    }
+    return r;
+}
+
 static void send_keys(void *dpy)
 {
     static unsigned was;
@@ -355,6 +412,7 @@ static void send_keys(void *dpy)
     static unsigned long root;
     if (!game_window || !dpy)
         return;
+    send_motion(dpy);
     unsigned now = pad_keys_down(), changed = now ^ was;
     if (!changed)
         return;
@@ -1056,6 +1114,7 @@ static struct {
     { "XRRConfigSizes", (void *)XRRConfigSizes, NULL, 0 },
     { "XGetWindowAttributes", (void *)XGetWindowAttributes, NULL, 0 },
     { "XGetInputFocus", (void *)XGetInputFocus, NULL, 0 },
+    { "XQueryPointer", (void *)XQueryPointer, NULL, 0 },
     { "XGetWindowProperty", (void *)XGetWindowProperty, NULL, 0 },
     { "XInternAtom", NULL, NULL, 0 },
 };
