@@ -319,14 +319,16 @@ static bool setup_audio(void)
     snprintf(alsa_conf, sizeof(alsa_conf), "/tmp/atarivcs-%d.asound.conf", (int)getpid());
     f = fopen(alsa_conf, "w");
     if (f) {
-        /* default and pulse alike: FMOD picks pulse from ALSA's device list
-         * when it is there */
-        for (int i = 0; i < 2; i++)
-            fprintf(f, "pcm.!%s {\n  type plug\n  slave { pcm \"atarivcs_fifo\"; format S16_LE; rate %d; channels 2 }\n"
-                       "  hint { show on description \"RetroArch\" }\n}\n",
-                    i ? "pulse" : "default", SAMPLE_RATE);
-        fprintf(f, "pcm.atarivcs_fifo {\n  type file\n  slave.pcm \"null\"\n  file \"%s\"\n  format \"raw\"\n}\n",
+        /* The whole of ALSA's configuration for the game (ALSA_CONFIG_PATH
+         * names this file only): default and pulse alike to the FIFO, as
+         * FMOD picks pulse when the system's configuration lists it */
+        fprintf(f, "pcm.null { type null }\n"
+                   "pcm.atarivcs_fifo { type file; slave.pcm \"null\"; file \"%s\"; format \"raw\" }\n",
                 audio_fifo);
+        for (int i = 0; i < 2; i++)
+            fprintf(f, "pcm.%s { type plug; slave { pcm \"atarivcs_fifo\"; format S16_LE; rate %d; channels 2 } "
+                       "hint.description \"RetroArch\" }\n",
+                    i ? "pulse" : "default", SAMPLE_RATE);
         fclose(f);
     } else {
         alsa_conf[0] = '\0';
@@ -565,10 +567,10 @@ bool retro_load_game(const struct retro_game_info *game)
             setenv("ALSOFT_CONF", audio_conf, 1);
             setenv("ALSOFT_DRIVERS", "wave", 1);
             if (alsa_conf[0]) {
-                /* ALSA's own configuration, then the core's default device;
-                 * and no PulseAudio, which Unity's FMOD would take first */
+                /* ALSA configured by the core alone; and no PulseAudio, which
+                 * Unity's FMOD would take first */
                 char path[512];
-                snprintf(path, sizeof(path), "/usr/share/alsa/alsa.conf:%s", alsa_conf);
+                snprintf(path, sizeof(path), "%s", alsa_conf);
                 setenv("ALSA_CONFIG_PATH", path, 1);
                 setenv("PULSE_SERVER", "unix:/nonexistent-atarivcs", 1);
             }
