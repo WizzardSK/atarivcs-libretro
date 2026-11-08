@@ -474,7 +474,12 @@ static int32_t pad_abs_value(unsigned code)
 
 static int is_pad_path(const char *path)
 {
-    return shared && path && !strcmp(path, PAD_PATH);
+    if (!shared || !path || strcmp(path, PAD_PATH))
+        return 0;
+    static int logged;
+    if (logged++ < 8)
+        fprintf(stderr, "atarivcs shim: the game looks at %s\n", path);
+    return 1;
 }
 
 static void fill_pad_stat(struct stat *st)
@@ -589,6 +594,9 @@ static void set_bit(unsigned char *bits, size_t len, unsigned bit)
 static int pad_ioctl(unsigned long req, void *arg)
 {
     const unsigned nr = _IOC_NR(req), size = _IOC_SIZE(req);
+    static int logged;
+    if (logged++ < 40)
+        fprintf(stderr, "atarivcs shim: pad ioctl type %c nr 0x%x size %u\n", (char)_IOC_TYPE(req), nr, size);
     if (_IOC_TYPE(req) != 'E')
         goto unsupported;
     if (req == EVIOCGVERSION) {
@@ -720,6 +728,11 @@ EXPORT ssize_t read(int fd, void *buf, size_t count)
             p->abs[pad_abs[a]] = v;
         }
     }
+    static unsigned reads, with_events;
+    reads++;
+    with_events += n != 0;
+    if (reads % 600 == 1)
+        fprintf(stderr, "atarivcs shim: pad reads %u, with events %u\n", reads, with_events);
     if (!n) {
         errno = EAGAIN;
         return -1;
