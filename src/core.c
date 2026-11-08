@@ -22,6 +22,7 @@
 
 #include "libretro.h"
 #include "shared.h"
+#include "daemon.h"
 
 #define SHIM_NAME "atarivcs_shim_x86_64.so"
 #define SAMPLE_RATE 48000
@@ -147,24 +148,36 @@ static bool is_dir(const char *path)
 }
 
 /* Exec= of a bundle.ini, '\r' and all trimmed */
-static bool read_exec(const char *ini, char *exec, size_t size)
+/* A key's value in a bundle.ini, '\r' and all trimmed */
+static bool ini_value(const char *ini, const char *key, char *out, size_t size)
 {
     FILE *f = fopen(ini, "r");
     if (!f)
         return false;
     char line[1024];
+    const size_t klen = strlen(key);
     bool found = false;
     while (fgets(line, sizeof(line), f)) {
-        if (strncmp(line, "Exec=", 5) != 0)
+        if (strncmp(line, key, klen) != 0 || line[klen] != '=')
             continue;
-        char *v = line + 5;
+        char *v = line + klen + 1;
         v[strcspn(v, "\r\n")] = '\0';
-        snprintf(exec, size, "%s", v);
+        snprintf(out, size, "%s", v);
         found = true;
         break;
     }
     fclose(f);
     return found;
+}
+
+static bool read_exec(const char *ini, char *exec, size_t size)
+{
+    return ini_value(ini, "Exec", exec, size);
+}
+
+static void daemon_log(const char *line)
+{
+    LOG_I("%s", line);
 }
 
 /* The folder next to this core's library: the shim lives beside it */
@@ -466,10 +479,18 @@ bool retro_load_game(const struct retro_game_info *game)
     if (!create_shared())
         return false;
     bool have_audio = setup_audio();
+    {
+        char store[128] = "", name[256] = "";
+        ini_value(ini, "StoreID", store, sizeof(store));
+        ini_value(ini, "Name", name, sizeof(name));
+        if (!atarivcs_daemon_start(store, name, daemon_log))
+            LOG_E("atarivcs: no stand-in for AtariOS's bundle bridge daemon; games with Atari's SDK may not start\n");
+    }
     frame = calloc((size_t)ATARIVCS_MAX_WIDTH * ATARIVCS_MAX_HEIGHT, 4);
     if (!frame) {
         destroy_shared();
         close_audio();
+        atarivcs_daemon_stop();
         return false;
     }
 
@@ -488,6 +509,7 @@ bool retro_load_game(const struct retro_game_info *game)
         LOG_E("atarivcs: fork: %s\n", strerror(errno));
         destroy_shared();
         close_audio();
+        atarivcs_daemon_stop();
         return false;
     }
     if (child == 0) {
@@ -495,6 +517,8 @@ bool retro_load_game(const struct retro_game_info *game)
         if (chdir(dir) != 0)
             _exit(127);
         setenv("ATARIVCS_SHM", shm_name, 1);
+        if (atarivcs_daemon_runtime_dir())
+            setenv("XDG_RUNTIME_DIR", atarivcs_daemon_runtime_dir(), 1);
         /* The pad for the SDL inside Unity games: the shim's device, and
          * read while the game's window is not focused (it never is) */
         setenv("SDL_JOYSTICK_DEVICE", "/dev/input/atarivcs-pad", 1);
@@ -536,6 +560,7 @@ void retro_unload_game(void)
     stop_child();
     destroy_shared();
     close_audio();
+    atarivcs_daemon_stop();
     free(frame);
     frame = NULL;
     have_frame = false;

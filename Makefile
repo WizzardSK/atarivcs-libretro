@@ -8,8 +8,8 @@ GIT_VERSION := $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 
 all: atarivcs_libretro.so
 
-atarivcs_libretro.so: src/core.c src/shared.h src/libretro.h
-	$(CC) $(CFLAGS) -fvisibility=default -DGIT_VERSION=\"$(GIT_VERSION)\" -shared -o $@ src/core.c -ldl -lrt -Wl,--version-script=src/link.T
+atarivcs_libretro.so: src/core.c src/daemon.c src/daemon.h src/shared.h src/libretro.h
+	$(CC) $(CFLAGS) -fvisibility=default -DGIT_VERSION=\"$(GIT_VERSION)\" -shared -o $@ src/core.c src/daemon.c -pthread -ldl -lrt -Wl,--version-script=src/link.T
 
 atarivcs_shim_x86_64.so: src/shim.c src/shared.h
 	$(CC) $(CFLAGS) -shared -o $@ src/shim.c -ldl -lrt
