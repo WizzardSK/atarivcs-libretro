@@ -60,7 +60,19 @@ static entry input_attrs[] = {
     { "id/product", "028e", &input_attrs[4] },
     { "id/version", "0114", &input_attrs[5] },
     { "phys", "usb-atarivcs-1/input0", &input_attrs[6] },
-    { "uniq", "", NULL },
+    { "uniq", "", &input_attrs[7] },
+    /* What the pad has, as sysfs writes it (longs in hex, highest first):
+     * Rewired reads these to build the joystick and drops a device
+     * without them. Keys are shim.c's pad_keys, axes its pad_abs. */
+    { "capabilities/ev", "b", &input_attrs[8] },
+    { "capabilities/key", "7cdb000000000000 0 0 0 0", &input_attrs[9] },
+    { "capabilities/abs", "3003f", &input_attrs[10] },
+    { "capabilities/rel", "0", &input_attrs[11] },
+    { "capabilities/msc", "0", &input_attrs[12] },
+    { "capabilities/led", "0", &input_attrs[13] },
+    { "capabilities/snd", "0", &input_attrs[14] },
+    { "capabilities/ff", "0", &input_attrs[15] },
+    { "capabilities/sw", "0", NULL },
 };
 static entry input_props[] = {
     { "SUBSYSTEM", "input", &input_props[1] },
@@ -247,14 +259,32 @@ static void *f_device_get_parent_with_subsystem_devtype(void *d, const char *sub
     return NULL;
 }
 
+/* Each question with no answer, once: what a game wanted and did not get */
+static void missed(const char *what, void *d, const char *name)
+{
+    static char seen[2048];
+    char key[128];
+    snprintf(key, sizeof(key), "|%s %s %s|", what, d ? ((device *)d)->sysname : "-", name ? name : "-");
+    if (strstr(seen, key) || strlen(seen) + strlen(key) >= sizeof(seen))
+        return;
+    strcat(seen, key);
+    fprintf(stderr, "atarivcs shim: udev has no %s %s of %s\n", what, name ? name : "-", d ? ((device *)d)->sysname : "-");
+}
+
 static const char *f_device_get_property_value(void *d, const char *key)
 {
-    return d ? lookup(((device *)d)->props, key) : NULL;
+    const char *v = d ? lookup(((device *)d)->props, key) : NULL;
+    if (!v)
+        missed("property", d, key);
+    return v;
 }
 
 static const char *f_device_get_sysattr_value(void *d, const char *name)
 {
-    return d ? lookup(((device *)d)->attrs, name) : NULL;
+    const char *v = d ? lookup(((device *)d)->attrs, name) : NULL;
+    if (!v)
+        missed("sysattr", d, name);
+    return v;
 }
 
 static void *f_device_get_properties_list_entry(void *d) { return d ? ((device *)d)->props : NULL; }
