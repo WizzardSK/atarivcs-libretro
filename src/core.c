@@ -526,6 +526,9 @@ bool retro_load_game(const struct retro_game_info *game)
         /* Rewired's native Linux input sees only udev's pads: the game's
          * libudev is the shim's, which knows the shim's pad (shim_udev.c) */
         setenv("ATARIVCS_FAKE_UDEV", "1", 1);
+        /* A 1280x720 display for the game (shim.c): drawn and read back at
+         * 1080p, Breakout Recharged ran at 13 fps under box64 */
+        setenv("ATARIVCS_SCREEN", "1280x720", 1);
         /* Debugging: the game's own window shown too */
         if (access("/tmp/atarivcs-show-window", F_OK) == 0)
             setenv("ATARIVCS_SHOW_WINDOW", "1", 1);

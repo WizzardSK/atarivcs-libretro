@@ -757,6 +757,136 @@ EXPORT ssize_t read(int fd, void *buf, size_t count)
     return (ssize_t)bytes;
 }
 
+/* ---- A smaller screen: the game is told the display is ATARIVCS_SCREEN
+ * (WxH, set by the core) wide, through XRandR (Unity's "native desktop
+ * resolution") and the root window's attributes. It then draws, and the
+ * shim reads back, that many pixels: at 1080p Breakout Recharged's menus
+ * and play ran at 13 fps under box64 on a Chromebook. ---- */
+
+typedef struct {
+    unsigned long id;
+    unsigned int width, height;
+    unsigned long dotClock;
+    unsigned int hSyncStart, hSyncEnd, hTotal, hSkew, vSyncStart, vSyncEnd, vTotal;
+    char *name;
+    unsigned int nameLength;
+    unsigned long modeFlags;
+} rr_mode_info;
+
+typedef struct {
+    unsigned long timestamp, configTimestamp;
+    int ncrtc;
+    unsigned long *crtcs;
+    int noutput;
+    unsigned long *outputs;
+    int nmode;
+    rr_mode_info *modes;
+} rr_screen_resources;
+
+typedef struct {
+    unsigned long timestamp;
+    int x, y;
+    unsigned int width, height;
+    unsigned long mode;
+} rr_crtc_info_head;
+
+typedef struct {
+    int width, height, mwidth, mheight;
+} rr_screen_size;
+
+typedef struct {
+    int x, y, width, height, border_width, depth;
+    void *visual;
+    unsigned long root;
+} window_attributes_head;
+
+/* The size to tell, 0 for the real one */
+static void screen_size(unsigned *w, unsigned *h)
+{
+    static int parsed;
+    static unsigned sw, sh;
+    if (!parsed) {
+        parsed = 1;
+        const char *v = getenv("ATARIVCS_SCREEN");
+        if (!v || sscanf(v, "%ux%u", &sw, &sh) != 2)
+            sw = sh = 0;
+    }
+    *w = sw;
+    *h = sh;
+}
+
+static void shrink_resources(rr_screen_resources *r)
+{
+    unsigned w, h;
+    screen_size(&w, &h);
+    if (!r || !w)
+        return;
+    for (int i = 0; i < r->nmode; i++) {
+        r->modes[i].width = w;
+        r->modes[i].height = h;
+    }
+}
+
+EXPORT void *XRRGetScreenResources(void *dpy, unsigned long window)
+{
+    void *(*real)(void *, unsigned long) = real_of("XRRGetScreenResources");
+    void *r = real ? real(dpy, window) : NULL;
+    shrink_resources(r);
+    return r;
+}
+
+EXPORT void *XRRGetScreenResourcesCurrent(void *dpy, unsigned long window)
+{
+    void *(*real)(void *, unsigned long) = real_of("XRRGetScreenResourcesCurrent");
+    void *r = real ? real(dpy, window) : NULL;
+    shrink_resources(r);
+    return r;
+}
+
+EXPORT void *XRRGetCrtcInfo(void *dpy, void *resources, unsigned long crtc)
+{
+    void *(*real)(void *, void *, unsigned long) = real_of("XRRGetCrtcInfo");
+    rr_crtc_info_head *c = real ? real(dpy, resources, crtc) : NULL;
+    unsigned w, h;
+    screen_size(&w, &h);
+    if (c && w && c->width && c->height) {
+        static int told;
+        if (!told++)
+            fprintf(stderr, "atarivcs shim: the screen is %ux%u to the game, not %ux%u\n", w, h, c->width, c->height);
+        c->width = w;
+        c->height = h;
+    }
+    return c;
+}
+
+EXPORT rr_screen_size *XRRConfigSizes(void *config, int *nsizes)
+{
+    rr_screen_size *(*real)(void *, int *) = real_of("XRRConfigSizes");
+    rr_screen_size *sizes = real ? real(config, nsizes) : NULL;
+    unsigned w, h;
+    screen_size(&w, &h);
+    if (sizes && nsizes && w)
+        for (int i = 0; i < *nsizes; i++) {
+            sizes[i].width = (int)w;
+            sizes[i].height = (int)h;
+        }
+    return sizes;
+}
+
+EXPORT int XGetWindowAttributes(void *dpy, unsigned long window, void *attrs)
+{
+    int (*real)(void *, unsigned long, void *) = real_of("XGetWindowAttributes");
+    int r = real ? real(dpy, window, attrs) : 0;
+    window_attributes_head *a = attrs;
+    unsigned w, h;
+    screen_size(&w, &h);
+    if (r && a && w && a->root == window) {
+        a->width = (int)w;
+        a->height = (int)h;
+    }
+    return r;
+}
+
 /* ---- dlsym: the functions above, also for games that look them up in the
  * libraries they dlopen (Unity). The real ones are kept for the hooks. ---- */
 
@@ -794,6 +924,11 @@ static struct {
     { "stat", (void *)stat, NULL, 0 },
     { "dlopen", (void *)dlopen, NULL, 0 },
     { "dlclose", (void *)dlclose, NULL, 0 },
+    { "XRRGetScreenResources", (void *)XRRGetScreenResources, NULL, 0 },
+    { "XRRGetScreenResourcesCurrent", (void *)XRRGetScreenResourcesCurrent, NULL, 0 },
+    { "XRRGetCrtcInfo", (void *)XRRGetCrtcInfo, NULL, 0 },
+    { "XRRConfigSizes", (void *)XRRConfigSizes, NULL, 0 },
+    { "XGetWindowAttributes", (void *)XGetWindowAttributes, NULL, 0 },
 };
 
 static void *real_of(const char *symbol)
