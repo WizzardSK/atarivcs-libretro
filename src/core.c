@@ -614,6 +614,14 @@ static void write_pad(void)
     shared->axes[ATARIVCS_AXIS_LY] = input_state_cb(0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_Y);
     shared->axes[ATARIVCS_AXIS_RX] = input_state_cb(0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_X);
     shared->axes[ATARIVCS_AXIS_RY] = input_state_cb(0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_Y);
+    /* The D-pad also as the left stick, while that rests: Breakout Recharged
+     * (Rewired) does not take the pad's hat, and the keyboard's arrows are
+     * the D-pad */
+    const int16_t lx = shared->axes[ATARIVCS_AXIS_LX], ly = shared->axes[ATARIVCS_AXIS_LY];
+    if (hat && lx > -8000 && lx < 8000 && ly > -8000 && ly < 8000) {
+        shared->axes[ATARIVCS_AXIS_LX] = (hat & ATARIVCS_HAT_LEFT) ? -32767 : (hat & ATARIVCS_HAT_RIGHT) ? 32767 : 0;
+        shared->axes[ATARIVCS_AXIS_LY] = (hat & ATARIVCS_HAT_UP) ? -32767 : (hat & ATARIVCS_HAT_DOWN) ? 32767 : 0;
+    }
     shared->axes[ATARIVCS_AXIS_LT] = trigger(RETRO_DEVICE_ID_JOYPAD_L2);
     shared->axes[ATARIVCS_AXIS_RT] = trigger(RETRO_DEVICE_ID_JOYPAD_R2);
 }
@@ -709,10 +717,11 @@ static void debug_press(void)
         [RETRO_DEVICE_ID_JOYPAD_START] = 1u << ATARIVCS_BTN_START, [RETRO_DEVICE_ID_JOYPAD_SELECT] = 1u << ATARIVCS_BTN_BACK,
     };
     switch (id) {
-    case RETRO_DEVICE_ID_JOYPAD_UP: shared->hat |= ATARIVCS_HAT_UP; break;
-    case RETRO_DEVICE_ID_JOYPAD_DOWN: shared->hat |= ATARIVCS_HAT_DOWN; break;
-    case RETRO_DEVICE_ID_JOYPAD_LEFT: shared->hat |= ATARIVCS_HAT_LEFT; break;
-    case RETRO_DEVICE_ID_JOYPAD_RIGHT: shared->hat |= ATARIVCS_HAT_RIGHT; break;
+    /* the D-pad as write_pad gives it: the hat and the left stick */
+    case RETRO_DEVICE_ID_JOYPAD_UP: shared->hat |= ATARIVCS_HAT_UP; shared->axes[ATARIVCS_AXIS_LY] = -32767; break;
+    case RETRO_DEVICE_ID_JOYPAD_DOWN: shared->hat |= ATARIVCS_HAT_DOWN; shared->axes[ATARIVCS_AXIS_LY] = 32767; break;
+    case RETRO_DEVICE_ID_JOYPAD_LEFT: shared->hat |= ATARIVCS_HAT_LEFT; shared->axes[ATARIVCS_AXIS_LX] = -32767; break;
+    case RETRO_DEVICE_ID_JOYPAD_RIGHT: shared->hat |= ATARIVCS_HAT_RIGHT; shared->axes[ATARIVCS_AXIS_LX] = 32767; break;
     default: shared->buttons |= bits[id]; break;
     }
 }
