@@ -483,10 +483,16 @@ EXPORT uint8_t SDL_JoystickGetHat(void *j, int hat)
 
 #include "shim_pad.h"
 
+/* The device is a copy of the Atari VCS Modern Controller as Linux shows it
+ * over Bluetooth (3250:1002, "Game Controller"): the games made for the VCS
+ * map that one - Breakout Recharged's Rewired took an Xbox 360 pad's menu
+ * input and never moved its paddle with it. Right stick on Z and RZ,
+ * triggers on GAS and BRAKE (0-1023), back, menu and the Atari button as
+ * keys. BTN_0 it has and nothing presses. */
 static const unsigned pad_keys[ATARIVCS_BTN_COUNT] = {
-    BTN_A, BTN_B, BTN_X, BTN_Y, BTN_TL, BTN_TR, BTN_SELECT, BTN_START, BTN_MODE, BTN_THUMBL, BTN_THUMBR,
+    BTN_A, BTN_B, BTN_X, BTN_Y, BTN_TL, BTN_TR, KEY_BACK, KEY_MENU, KEY_HOMEPAGE, BTN_THUMBL, BTN_THUMBR,
 };
-static const unsigned pad_abs[] = { ABS_X, ABS_Y, ABS_Z, ABS_RX, ABS_RY, ABS_RZ, ABS_HAT0X, ABS_HAT0Y };
+static const unsigned pad_abs[] = { ABS_X, ABS_Y, ABS_Z, ABS_RZ, ABS_GAS, ABS_BRAKE, ABS_HAT0X, ABS_HAT0Y, ABS_MISC };
 
 typedef struct {
     int fd;
@@ -515,10 +521,11 @@ static int32_t pad_abs_value(unsigned code)
     switch (code) {
     case ABS_X: return shared->axes[ATARIVCS_AXIS_LX];
     case ABS_Y: return shared->axes[ATARIVCS_AXIS_LY];
-    case ABS_RX: return shared->axes[ATARIVCS_AXIS_RX];
-    case ABS_RY: return shared->axes[ATARIVCS_AXIS_RY];
-    case ABS_Z: return (shared->axes[ATARIVCS_AXIS_LT] + 32768) >> 8;
-    case ABS_RZ: return (shared->axes[ATARIVCS_AXIS_RT] + 32768) >> 8;
+    case ABS_Z: return shared->axes[ATARIVCS_AXIS_RX];
+    case ABS_RZ: return shared->axes[ATARIVCS_AXIS_RY];
+    case ABS_BRAKE: return (shared->axes[ATARIVCS_AXIS_LT] + 32768) >> 6;
+    case ABS_GAS: return (shared->axes[ATARIVCS_AXIS_RT] + 32768) >> 6;
+    case ABS_MISC: return 68;
     case ABS_HAT0X: return (shared->hat & ATARIVCS_HAT_RIGHT) ? 1 : (shared->hat & ATARIVCS_HAT_LEFT) ? -1 : 0;
     case ABS_HAT0Y: return (shared->hat & ATARIVCS_HAT_DOWN) ? 1 : (shared->hat & ATARIVCS_HAT_UP) ? -1 : 0;
     }
@@ -662,14 +669,14 @@ static int pad_ioctl(unsigned long req, void *arg)
     }
     if (req == EVIOCGID) {
         struct input_id *id = arg;
-        id->bustype = BUS_USB;
-        id->vendor = 0x045e;
-        id->product = 0x028e;
-        id->version = 0x0114;
+        id->bustype = BUS_BLUETOOTH;
+        id->vendor = 0x3250;
+        id->product = 0x1002;
+        id->version = 0x0147;
         return 0;
     }
     if (nr == _IOC_NR(EVIOCGNAME(0))) {
-        const char *name = "Microsoft X-Box 360 pad";
+        const char *name = "Game Controller";
         size_t n = strlen(name) + 1 < size ? strlen(name) + 1 : size;
         memcpy(arg, name, n);
         return (int)n;
@@ -698,9 +705,13 @@ static int pad_ioctl(unsigned long req, void *arg)
             set_bit(arg, size, EV_SYN);
             set_bit(arg, size, EV_KEY);
             set_bit(arg, size, EV_ABS);
+            set_bit(arg, size, EV_MSC);
         } else if (ev == EV_KEY) {
             for (unsigned b = 0; b < ATARIVCS_BTN_COUNT; b++)
                 set_bit(arg, size, pad_keys[b]);
+            set_bit(arg, size, BTN_0);
+        } else if (ev == EV_MSC) {
+            set_bit(arg, size, MSC_SCAN);
         } else if (ev == EV_ABS) {
             for (size_t a = 0; a < sizeof(pad_abs) / sizeof(pad_abs[0]); a++)
                 set_bit(arg, size, pad_abs[a]);
@@ -712,16 +723,21 @@ static int pad_ioctl(unsigned long req, void *arg)
         struct input_absinfo *info = arg;
         memset(info, 0, sizeof(*info));
         info->value = pad_abs_value(code);
-        if (code == ABS_Z || code == ABS_RZ) {
-            info->maximum = 255;
+        if (code == ABS_GAS || code == ABS_BRAKE) {
+            info->maximum = 1023;
+            info->fuzz = 3;
+            info->flat = 63;
         } else if (code == ABS_HAT0X || code == ABS_HAT0Y) {
             info->minimum = -1;
             info->maximum = 1;
+        } else if (code == ABS_MISC) {
+            info->maximum = 255;
+            info->flat = 15;
         } else {
-            info->minimum = -32768;
+            info->minimum = -32767;
             info->maximum = 32767;
-            info->fuzz = 16;
-            info->flat = 128;
+            info->fuzz = 255;
+            info->flat = 4095;
         }
         return 0;
     }

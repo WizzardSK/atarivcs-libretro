@@ -1,10 +1,12 @@
-/* A libudev that knows one device: the shim's pad. Rewired's native Linux
+/* A libudev that knows one device: the shim's pad (an Atari VCS Modern
+ * Controller over Bluetooth, as shim.c describes it). Rewired's native Linux
  * input (Rewired_Linux.dll, Unity games such as Breakout Recharged) finds
  * its pads only through libudev, which the real one answers with the
  * machine's devices and never the shim's; without libudev it falls back to
  * Unity's input, which did not see the pad either. So when the game opens
  * libudev it gets this: an input device event250 with its input250 parent
- * and a USB parent, as an Xbox 360 pad (xpad) shows in udev. The other
+ * as the Modern Controller shows in udev, under a USB parent with the
+ * same ids for anything that looks the vendor up there. The other
  * functions Rewired binds answer nothing. */
 #define _GNU_SOURCE
 #include <stdint.h>
@@ -34,18 +36,18 @@ typedef struct device {
 
 /* The USB device */
 static entry usb_attrs[] = {
-    { "idVendor", "045e", &usb_attrs[1] },
-    { "idProduct", "028e", &usb_attrs[2] },
-    { "bcdDevice", "0114", &usb_attrs[3] },
-    { "manufacturer", "Microsoft", &usb_attrs[4] },
-    { "product", "Controller", &usb_attrs[5] },
+    { "idVendor", "3250", &usb_attrs[1] },
+    { "idProduct", "1002", &usb_attrs[2] },
+    { "bcdDevice", "0147", &usb_attrs[3] },
+    { "manufacturer", "Atari", &usb_attrs[4] },
+    { "product", "Game Controller", &usb_attrs[5] },
     { "serial", "ATARIVCS0001", NULL },
 };
 static entry usb_props[] = {
     { "SUBSYSTEM", "usb", &usb_props[1] },
     { "DEVTYPE", "usb_device", &usb_props[2] },
-    { "ID_VENDOR_ID", "045e", &usb_props[3] },
-    { "ID_MODEL_ID", "028e", NULL },
+    { "ID_VENDOR_ID", "3250", &usb_props[3] },
+    { "ID_MODEL_ID", "1002", NULL },
 };
 static device usb_dev = {
     "/sys/devices/virtual/atarivcs/usb1/1-1", "1-1", "/devices/virtual/atarivcs/usb1/1-1",
@@ -54,22 +56,22 @@ static device usb_dev = {
 
 /* The input device */
 static entry input_attrs[] = {
-    { "name", "Microsoft X-Box 360 pad", &input_attrs[1] },
-    { "id/bustype", "0003", &input_attrs[2] },
-    { "id/vendor", "045e", &input_attrs[3] },
-    { "id/product", "028e", &input_attrs[4] },
-    { "id/version", "0114", &input_attrs[5] },
-    { "phys", "usb-atarivcs-1/input0", &input_attrs[6] },
+    { "name", "Game Controller", &input_attrs[1] },
+    { "id/bustype", "0005", &input_attrs[2] },
+    { "id/vendor", "3250", &input_attrs[3] },
+    { "id/product", "1002", &input_attrs[4] },
+    { "id/version", "0147", &input_attrs[5] },
+    { "phys", "atarivcs/input0", &input_attrs[6] },
     { "uniq", "", NULL },
 };
 static entry input_props[] = {
     { "SUBSYSTEM", "input", &input_props[1] },
-    { "NAME", "\"Microsoft X-Box 360 pad\"", &input_props[2] },
+    { "NAME", "\"Game Controller\"", &input_props[2] },
     { "ID_INPUT", "1", &input_props[3] },
     { "ID_INPUT_JOYSTICK", "1", &input_props[4] },
-    { "ID_BUS", "usb", &input_props[5] },
-    { "ID_VENDOR_ID", "045e", &input_props[6] },
-    { "ID_MODEL_ID", "028e", NULL },
+    { "ID_BUS", "bluetooth", &input_props[5] },
+    { "ID_VENDOR_ID", "3250", &input_props[6] },
+    { "ID_MODEL_ID", "1002", NULL },
 };
 static device input_dev = {
     "/sys/devices/virtual/atarivcs/usb1/1-1/input/input250", "input250",
@@ -84,10 +86,10 @@ static entry event_props[] = {
     { "MINOR", "1023", &event_props[4] },
     { "ID_INPUT", "1", &event_props[5] },
     { "ID_INPUT_JOYSTICK", "1", &event_props[6] },
-    { "ID_BUS", "usb", &event_props[7] },
-    { "ID_VENDOR_ID", "045e", &event_props[8] },
-    { "ID_MODEL_ID", "028e", &event_props[9] },
-    { "ID_SERIAL", "Microsoft_Controller_ATARIVCS0001", NULL },
+    { "ID_BUS", "bluetooth", &event_props[7] },
+    { "ID_VENDOR_ID", "3250", &event_props[8] },
+    { "ID_MODEL_ID", "1002", &event_props[9] },
+    { "ID_SERIAL", "noserial", NULL },
 };
 static device event_dev = {
     "/sys/devices/virtual/atarivcs/usb1/1-1/input/input250/" PAD_SYSNAME, PAD_SYSNAME,
