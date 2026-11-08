@@ -163,7 +163,8 @@ EXPORT void glXSwapBuffers(void *dpy, unsigned long drawable)
         real(dpy, drawable);
 }
 
-/* ---- Keyboard and pointer: left to RetroArch, which plays the pad ---- */
+/* ---- Keyboard and pointer: left to RetroArch, which plays the pad. Focus
+ * is let through: Bloo Kid waits for its FocusIn after setting it ---- */
 
 #define GrabSuccess 0
 
@@ -180,11 +181,6 @@ EXPORT int XGrabPointer(void *dpy, unsigned long w, int owner, unsigned int mask
     return GrabSuccess;
 }
 
-EXPORT int XSetInputFocus(void *dpy, unsigned long focus, int revert, unsigned long time)
-{
-    (void)dpy; (void)focus; (void)revert; (void)time;
-    return 1;
-}
 
 /* ---- The pad: one SDL joystick, the core's ---- */
 
