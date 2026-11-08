@@ -172,8 +172,13 @@ static void capture(void *dpy, unsigned long drawable)
         unsigned nonzero = 0;
         for (size_t i = 0; i < (size_t)w * h * 4; i += 4093)
             nonzero += shared->pixels[i] != 0;
-        fprintf(stderr, "atarivcs shim: swap %u, %ux%u, read buffer was 0x%x, fbo %d, error 0x%x, nonzero samples %u\n",
-                swaps, w, h, (unsigned)read_buf, read_fbo, get_error ? get_error() : 0u, nonzero);
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        static double last;
+        const double t = now.tv_sec + now.tv_nsec / 1e9;
+        fprintf(stderr, "atarivcs shim: swap %u, %ux%u, %.1f fps, read buffer was 0x%x, fbo %d, error 0x%x, nonzero samples %u\n",
+                swaps, w, h, last ? 120.0 / (t - last) : 0.0, (unsigned)read_buf, read_fbo, get_error ? get_error() : 0u, nonzero);
+        last = t;
     }
 
     read_buffer((GLenum)read_buf);
