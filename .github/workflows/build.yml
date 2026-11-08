@@ -1,0 +1,41 @@
+name: Build
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  shim:
+    name: Shim (x86-64)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: make atarivcs_shim_x86_64.so
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shim
+          path: atarivcs_shim_x86_64.so
+
+  core:
+    name: Core (${{ matrix.arch }})
+    needs: shim
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-22.04
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: make atarivcs_libretro.so
+      - uses: actions/download-artifact@v4
+        with:
+          name: shim
+      - uses: actions/upload-artifact@v4
+        with:
+          name: atarivcs_libretro-linux-${{ matrix.arch }}
+          path: |
+            atarivcs_libretro.so
+            atarivcs_shim_x86_64.so
