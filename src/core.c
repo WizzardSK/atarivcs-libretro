@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -546,6 +547,10 @@ bool retro_load_game(const struct retro_game_info *game)
     }
     if (child == 0) {
         setpgid(0, 0);
+        /* The game goes with RetroArch, however RetroArch ends: killed, it
+         * never unloads the core, and a Unity game left running refuses a
+         * second start ("Player is already running") */
+        prctl(PR_SET_PDEATHSIG, SIGKILL);
         if (chdir(dir) != 0)
             _exit(127);
         setenv("ATARIVCS_SHM", shm_name, 1);
