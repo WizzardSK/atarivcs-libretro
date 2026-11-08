@@ -129,6 +129,19 @@ static void capture(void *dpy, unsigned long drawable)
     shared->height = h;
     __atomic_add_fetch(&shared->frame_seq, 1, __ATOMIC_ACQ_REL); /* even: done */
 
+    /* Every two seconds or so: what the reads give */
+    static unsigned swaps;
+    if (++swaps % 120 == 1) {
+        static GLenum (*get_error)(void);
+        if (!get_error)
+            get_error = dlsym(RTLD_DEFAULT, "glGetError");
+        unsigned nonzero = 0;
+        for (size_t i = 0; i < (size_t)w * h * 4; i += 4093)
+            nonzero += shared->pixels[i] != 0;
+        fprintf(stderr, "atarivcs shim: swap %u, %ux%u, read buffer was 0x%x, fbo %d, error 0x%x, nonzero samples %u\n",
+                swaps, w, h, (unsigned)read_buf, read_fbo, get_error ? get_error() : 0u, nonzero);
+    }
+
     read_buffer((GLenum)read_buf);
     pixel_storei(GL_PACK_ALIGNMENT, align);
     pixel_storei(GL_PACK_ROW_LENGTH, row);
