@@ -705,6 +705,20 @@ static void write_pad(void)
     }
     shared->axes[ATARIVCS_AXIS_LT] = trigger(RETRO_DEVICE_ID_JOYPAD_L2);
     shared->axes[ATARIVCS_AXIS_RT] = trigger(RETRO_DEVICE_ID_JOYPAD_R2);
+
+    /* What RetroArch handed over, a line per change, while finding why a
+     * pad RetroArch configured never reached the game */
+    static uint32_t last_buttons;
+    static uint8_t last_hat;
+    static int last_lx, last_ly;
+    const int nlx = shared->axes[ATARIVCS_AXIS_LX] / 8192, nly = shared->axes[ATARIVCS_AXIS_LY] / 8192;
+    if (buttons != last_buttons || hat != last_hat || nlx != last_lx || nly != last_ly) {
+        LOG_I("atarivcs: pad buttons 0x%x hat 0x%x stick %d %d\n", buttons, hat, nlx, nly);
+        last_buttons = buttons;
+        last_hat = hat;
+        last_lx = nlx;
+        last_ly = nly;
+    }
 }
 
 /* The newest whole frame the shim wrote, flipped top down */
