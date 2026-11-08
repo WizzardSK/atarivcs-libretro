@@ -404,10 +404,14 @@ static void play_audio(void)
 {
     enum { PER_RUN = SAMPLE_RATE / FPS };
     static int16_t out[PER_RUN * 2];
+    /* Up to a few frames' worth queued, no more: a writer with no clock of
+     * its own (ALSA's file device) would refill the FIFO as fast as it is
+     * read, and an open-ended read held retro_run for good; a full FIFO is
+     * what paces it */
     if (audio_fd >= 0) {
-        uint8_t buf[16384];
+        uint8_t buf[PER_RUN * 4];
         ssize_t got;
-        while ((got = read(audio_fd, buf, sizeof(buf))) > 0)
+        while (audio_frames < PER_RUN * 3 && (got = read(audio_fd, buf, sizeof(buf))) > 0)
             take_audio_bytes(buf, (size_t)got);
     }
     /* Latency: no more than a few frames queued */
