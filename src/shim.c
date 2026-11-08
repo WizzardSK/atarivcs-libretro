@@ -295,8 +295,12 @@ static int show_window(void)
     return v && *v == '1';
 }
 
+/* The game's window, as far as focus goes */
+static unsigned long game_window;
+
 static int map_window(const char *name, void *dpy, unsigned long w)
 {
+    game_window = w;
     if (show_window()) {
         int (*real)(void *, unsigned long) = next(name);
         owe(FocusIn, dpy, w);
@@ -381,6 +385,48 @@ EXPORT int XEventsQueued(void *dpy, int mode)
     if (!real)
         real = next("XEventsQueued");
     return owed_count + (real ? real(dpy, mode) : 0);
+}
+
+/* The other ways a game asks about focus: XGetInputFocus, and the window
+ * manager's _NET_ACTIVE_WINDOW (on the root) and _NET_WM_STATE_FOCUSED (on
+ * its window). Unity asks them, and Rewired drops its pads' input while
+ * Unity's window is not focused - Breakout Recharged's menus took the pad
+ * through Unity's own input, its paddle (Rewired) never did. */
+EXPORT int XGetInputFocus(void *dpy, unsigned long *focus, int *revert)
+{
+    int (*real)(void *, unsigned long *, int *) = real_of("XGetInputFocus");
+    int r = real ? real(dpy, focus, revert) : 1;
+    if (game_window && focus)
+        *focus = game_window;
+    return r;
+}
+
+EXPORT int XGetWindowProperty(void *dpy, unsigned long w, unsigned long property, long offset, long length,
+                              int del, unsigned long req_type, unsigned long *actual_type, int *actual_format,
+                              unsigned long *nitems, unsigned long *bytes_after, unsigned char **prop)
+{
+    int (*real)(void *, unsigned long, unsigned long, long, long, int, unsigned long, unsigned long *, int *,
+                unsigned long *, unsigned long *, unsigned char **) = real_of("XGetWindowProperty");
+    unsigned long (*intern)(void *, const char *, int) = real_of("XInternAtom");
+    if (game_window && intern) {
+        const unsigned long active = intern(dpy, "_NET_ACTIVE_WINDOW", 0);
+        const unsigned long state = intern(dpy, "_NET_WM_STATE", 0);
+        if ((property == active && w != game_window) || (property == state && w == game_window)) {
+            unsigned long *value = malloc(sizeof(unsigned long));
+            if (value) {
+                *value = property == active ? game_window : intern(dpy, "_NET_WM_STATE_FOCUSED", 0);
+                *actual_type = property == active ? 33 /* XA_WINDOW */ : 4 /* XA_ATOM */;
+                *actual_format = 32;
+                *nitems = 1;
+                *bytes_after = 0;
+                *prop = (unsigned char *)value;
+                return 0; /* Success */
+            }
+        }
+    }
+    return real ? real(dpy, w, property, offset, length, del, req_type, actual_type, actual_format, nitems,
+                       bytes_after, prop)
+                : 1;
 }
 
 /* ---- The pad: one SDL joystick, the core's ---- */
@@ -934,6 +980,9 @@ static struct {
     { "XRRGetCrtcInfo", (void *)XRRGetCrtcInfo, NULL, 0 },
     { "XRRConfigSizes", (void *)XRRConfigSizes, NULL, 0 },
     { "XGetWindowAttributes", (void *)XGetWindowAttributes, NULL, 0 },
+    { "XGetInputFocus", (void *)XGetInputFocus, NULL, 0 },
+    { "XGetWindowProperty", (void *)XGetWindowProperty, NULL, 0 },
+    { "XInternAtom", NULL, NULL, 0 },
 };
 
 static void *real_of(const char *symbol)
@@ -948,7 +997,8 @@ static void *real_of(const char *symbol)
 }
 
 /* A looked-up function the shim has its own of: the real one kept, the
- * shim's returned */
+ * shim's returned (entries without one of the shim's only keep the real one,
+ * for the shim's own use) */
 static void *swap_in(void *lib, const char *name, void *found)
 {
     if (!found || !name)
@@ -961,7 +1011,8 @@ static void *swap_in(void *lib, const char *name, void *found)
                 hooks[i].real = found;
             if (hooks[i].gl && lib)
                 gl_lib = lib;
-            return hooks[i].mine;
+            /* No function of the shim's: only the real one is wanted */
+            return hooks[i].mine ? hooks[i].mine : found;
         }
     return found;
 }
