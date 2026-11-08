@@ -38,9 +38,42 @@ __attribute__((constructor)) static void shim_init(void)
     fprintf(stderr, "atarivcs shim: attached to %s\n", name);
 }
 
+/* The dynamic linker's dlsym: this library exports its own (below), for the
+ * games that dlopen their libraries (Unity: libGL, libX11) */
+static void *(*real_dlsym)(void *, const char *);
+
+static void find_real_dlsym(void)
+{
+    if (real_dlsym)
+        return;
+    real_dlsym = dlvsym(RTLD_NEXT, "dlsym", "GLIBC_2.34");
+    if (!real_dlsym)
+        real_dlsym = dlvsym(RTLD_NEXT, "dlsym", "GLIBC_2.2.5");
+    if (!real_dlsym)
+        fprintf(stderr, "atarivcs shim: no real dlsym\n");
+}
+
+/* The library a game took its GL functions from; NULL for the global scope */
+static void *gl_lib;
+
+static void *lookup(void *lib, const char *symbol)
+{
+    find_real_dlsym();
+    if (!real_dlsym)
+        return NULL;
+    void *f = lib ? real_dlsym(lib, symbol) : NULL;
+    if (!f)
+        f = real_dlsym(RTLD_NEXT, symbol);
+    if (!f)
+        f = real_dlsym(RTLD_DEFAULT, symbol);
+    return f;
+}
+
+static void *real_of(const char *symbol);
+
 static void *next(const char *symbol)
 {
-    void *f = dlsym(RTLD_NEXT, symbol);
+    void *f = real_of(symbol);
     if (!f)
         fprintf(stderr, "atarivcs shim: no %s\n", symbol);
     return f;
@@ -81,12 +114,12 @@ static void capture(void *dpy, unsigned long drawable)
         return;
     if (!resolved) {
         resolved = 1;
-        query = dlsym(RTLD_DEFAULT, "glXQueryDrawable");
-        get_integerv = dlsym(RTLD_DEFAULT, "glGetIntegerv");
-        read_buffer = dlsym(RTLD_DEFAULT, "glReadBuffer");
-        pixel_storei = dlsym(RTLD_DEFAULT, "glPixelStorei");
-        read_pixels = dlsym(RTLD_DEFAULT, "glReadPixels");
-        void *(*proc)(const unsigned char *) = dlsym(RTLD_DEFAULT, "glXGetProcAddress");
+        query = lookup(gl_lib, "glXQueryDrawable");
+        get_integerv = lookup(gl_lib, "glGetIntegerv");
+        read_buffer = lookup(gl_lib, "glReadBuffer");
+        pixel_storei = lookup(gl_lib, "glPixelStorei");
+        read_pixels = lookup(gl_lib, "glReadPixels");
+        void *(*proc)(const unsigned char *) = lookup(gl_lib, "glXGetProcAddress");
         if (proc) {
             bind_buffer = proc((const unsigned char *)"glBindBuffer");
             bind_framebuffer = proc((const unsigned char *)"glBindFramebuffer");
@@ -134,7 +167,7 @@ static void capture(void *dpy, unsigned long drawable)
     if (++swaps % 120 == 1) {
         static GLenum (*get_error)(void);
         if (!get_error)
-            get_error = dlsym(RTLD_DEFAULT, "glGetError");
+            get_error = lookup(gl_lib, "glGetError");
         unsigned nonzero = 0;
         for (size_t i = 0; i < (size_t)w * h * 4; i += 4093)
             nonzero += shared->pixels[i] != 0;
@@ -181,8 +214,7 @@ EXPORT void glXSwapBuffers(void *dpy, unsigned long drawable)
     wait_for_run();
 }
 
-/* ---- Keyboard and pointer: left to RetroArch, which plays the pad. Focus
- * is let through: Bloo Kid waits for its FocusIn after setting it ---- */
+/* ---- Keyboard and pointer: left to RetroArch, which plays the pad ---- */
 
 #define GrabSuccess 0
 
@@ -384,4 +416,81 @@ EXPORT uint8_t SDL_JoystickGetHat(void *j, int hat)
     if (j != &the_pad || !shared || hat != 0)
         return 0;
     return shared->hat;
+}
+
+/* ---- dlsym: the functions above, also for games that look them up in the
+ * libraries they dlopen (Unity). The real ones are kept for the hooks. ---- */
+
+EXPORT void *glXGetProcAddress(const unsigned char *name);
+EXPORT void *glXGetProcAddressARB(const unsigned char *name);
+
+static struct {
+    const char *name;
+    void *mine;
+    void *real;
+    int gl;
+} hooks[] = {
+    { "glXSwapBuffers", (void *)glXSwapBuffers, NULL, 1 },
+    { "glXGetProcAddress", (void *)glXGetProcAddress, NULL, 1 },
+    { "glXGetProcAddressARB", (void *)glXGetProcAddressARB, NULL, 1 },
+    { "XGrabKeyboard", (void *)XGrabKeyboard, NULL, 0 },
+    { "XGrabPointer", (void *)XGrabPointer, NULL, 0 },
+    { "XMapWindow", (void *)XMapWindow, NULL, 0 },
+    { "XMapRaised", (void *)XMapRaised, NULL, 0 },
+    { "XNextEvent", (void *)XNextEvent, NULL, 0 },
+    { "XPeekEvent", (void *)XPeekEvent, NULL, 0 },
+    { "XPeekIfEvent", (void *)XPeekIfEvent, NULL, 0 },
+    { "XIfEvent", (void *)XIfEvent, NULL, 0 },
+    { "XPending", (void *)XPending, NULL, 0 },
+    { "XEventsQueued", (void *)XEventsQueued, NULL, 0 },
+};
+
+static void *real_of(const char *symbol)
+{
+    for (size_t i = 0; i < sizeof(hooks) / sizeof(hooks[0]); i++)
+        if (!strcmp(hooks[i].name, symbol)) {
+            if (!hooks[i].real)
+                hooks[i].real = lookup(NULL, symbol);
+            return hooks[i].real;
+        }
+    return lookup(NULL, symbol);
+}
+
+/* A looked-up function the shim has its own of: the real one kept, the
+ * shim's returned */
+static void *swap_in(void *lib, const char *name, void *found)
+{
+    if (!found || !name)
+        return found;
+    for (size_t i = 0; i < sizeof(hooks) / sizeof(hooks[0]); i++)
+        if (!strcmp(hooks[i].name, name)) {
+            if (found == hooks[i].mine)
+                return found;
+            if (!hooks[i].real)
+                hooks[i].real = found;
+            if (hooks[i].gl && lib)
+                gl_lib = lib;
+            return hooks[i].mine;
+        }
+    return found;
+}
+
+EXPORT void *dlsym(void *lib, const char *name)
+{
+    find_real_dlsym();
+    if (!real_dlsym)
+        return NULL;
+    return swap_in(lib, name, real_dlsym(lib, name));
+}
+
+EXPORT void *glXGetProcAddress(const unsigned char *name)
+{
+    void *(*real)(const unsigned char *) = real_of("glXGetProcAddress");
+    return swap_in(NULL, (const char *)name, real ? real(name) : NULL);
+}
+
+EXPORT void *glXGetProcAddressARB(const unsigned char *name)
+{
+    void *(*real)(const unsigned char *) = real_of("glXGetProcAddressARB");
+    return swap_in(NULL, (const char *)name, real ? real(name) : NULL);
 }
