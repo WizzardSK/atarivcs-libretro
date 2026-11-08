@@ -769,6 +769,15 @@ static void write_pad(void)
         ring_last = ring;
     }
     ring_seen = true;
+    /* The D-pad (the keyboard's arrows) and the left stick move the pointer
+     * too: Breakout Recharged with "mouse controls" on (its default) moves
+     * the paddle by the mouse alone */
+    if (hat & ATARIVCS_HAT_LEFT)
+        dx -= 12;
+    else if (hat & ATARIVCS_HAT_RIGHT)
+        dx += 12;
+    else if (lx < -8000 || lx > 8000)
+        dx += lx * 12 / 32767;
     shared->mouse_x += dx;
 
     /* What RetroArch handed over, a line per change, while finding why a
