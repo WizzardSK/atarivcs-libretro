@@ -984,6 +984,14 @@ EXPORT void *dlopen(const char *file, int flags)
             fprintf(stderr, "atarivcs shim: the shim's udev for %s\n", file);
         return &atarivcs_fake_udev_handle;
     }
+    /* Rewired asks for libudev.so.0 by name, which today's systems (and
+     * box64's wrappers) only have as libudev.so.1 */
+    if (file && strstr(file, "libudev.so.0")) {
+        void *h = real ? real(file, flags) : NULL;
+        if (!h && real)
+            h = real("libudev.so.1", flags);
+        return h;
+    }
     return real ? real(file, flags) : NULL;
 }
 
