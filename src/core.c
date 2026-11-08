@@ -319,9 +319,14 @@ static bool setup_audio(void)
     snprintf(alsa_conf, sizeof(alsa_conf), "/tmp/atarivcs-%d.asound.conf", (int)getpid());
     f = fopen(alsa_conf, "w");
     if (f) {
-        fprintf(f, "pcm.!default {\n  type plug\n  slave { pcm \"atarivcs_fifo\"; format S16_LE; rate %d; channels 2 }\n}\n"
-                   "pcm.atarivcs_fifo {\n  type file\n  slave.pcm \"null\"\n  file \"%s\"\n  format \"raw\"\n}\n",
-                SAMPLE_RATE, audio_fifo);
+        /* default and pulse alike: FMOD picks pulse from ALSA's device list
+         * when it is there */
+        for (int i = 0; i < 2; i++)
+            fprintf(f, "pcm.!%s {\n  type plug\n  slave { pcm \"atarivcs_fifo\"; format S16_LE; rate %d; channels 2 }\n"
+                       "  hint { show on description \"RetroArch\" }\n}\n",
+                    i ? "pulse" : "default", SAMPLE_RATE);
+        fprintf(f, "pcm.atarivcs_fifo {\n  type file\n  slave.pcm \"null\"\n  file \"%s\"\n  format \"raw\"\n}\n",
+                audio_fifo);
         fclose(f);
     } else {
         alsa_conf[0] = '\0';
