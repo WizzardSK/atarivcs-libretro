@@ -521,11 +521,11 @@ bool retro_load_game(const struct retro_game_info *game)
             setenv("XDG_RUNTIME_DIR", atarivcs_daemon_runtime_dir(), 1);
         /* The pad for the SDL inside Unity games: the shim's device, and
          * read while the game's window is not focused (it never is) */
-        setenv("SDL_JOYSTICK_DEVICE", "/dev/input/atarivcs-pad", 1);
+        setenv("SDL_JOYSTICK_DEVICE", "/dev/input/event250", 1); /* shim_pad.h */
         setenv("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1", 1);
-        /* Rewired's native Linux input sees only udev's pads: without
-         * libudev it uses Unity's input, which sees the shim's (shim.c) */
-        setenv("ATARIVCS_NO_UDEV", "1", 1);
+        /* Rewired's native Linux input sees only udev's pads: the game's
+         * libudev is the shim's, which knows the shim's pad (shim_udev.c) */
+        setenv("ATARIVCS_FAKE_UDEV", "1", 1);
         if (have_audio) {
             setenv("ALSOFT_CONF", audio_conf, 1);
             setenv("ALSOFT_DRIVERS", "wave", 1);

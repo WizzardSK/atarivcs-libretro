@@ -430,7 +430,7 @@ EXPORT uint8_t SDL_JoystickGetHat(void *j, int hat)
 #include <sys/sysmacros.h>
 #include <linux/input.h>
 
-#define PAD_PATH "/dev/input/atarivcs-pad"
+#include "shim_pad.h"
 
 static const unsigned pad_keys[ATARIVCS_BTN_COUNT] = {
     BTN_A, BTN_B, BTN_X, BTN_Y, BTN_TL, BTN_TR, BTN_SELECT, BTN_START, BTN_MODE, BTN_THUMBL, BTN_THUMBR,
@@ -486,7 +486,7 @@ static void fill_pad_stat(struct stat *st)
 {
     memset(st, 0, sizeof(*st));
     st->st_mode = S_IFCHR | 0660;
-    st->st_rdev = makedev(13, 1023);
+    st->st_rdev = makedev(PAD_MAJOR, PAD_MINOR);
     st->st_nlink = 1;
 }
 
@@ -788,6 +788,7 @@ static struct {
     { "__xstat64", (void *)__xstat64, NULL, 0 },
     { "stat", (void *)stat, NULL, 0 },
     { "dlopen", (void *)dlopen, NULL, 0 },
+    { "dlclose", (void *)dlclose, NULL, 0 },
 };
 
 static void *real_of(const char *symbol)
@@ -820,10 +821,10 @@ static void *swap_in(void *lib, const char *name, void *found)
     return found;
 }
 
-/* No libudev for the game when the core asks (ATARIVCS_NO_UDEV): Rewired's
- * native Linux input finds its pads through udev only, which knows nothing
- * of the shim's pad, and without it falls back to Unity's input, whose SDL
- * takes the pad from SDL_JOYSTICK_DEVICE */
+/* libudev, when the core asks (ATARIVCS_FAKE_UDEV), is the shim's own
+ * (shim_udev.c), which knows the shim's pad only: Rewired's native Linux
+ * input finds its pads through udev alone, and the real one knows nothing
+ * of the shim's */
 EXPORT void *dlopen(const char *file, int flags)
 {
     static void *(*real)(const char *, int);
@@ -832,17 +833,32 @@ EXPORT void *dlopen(const char *file, int flags)
         if (!real)
             real = dlvsym(RTLD_NEXT, "dlopen", "GLIBC_2.2.5");
     }
-    if (file && strstr(file, "libudev") && getenv("ATARIVCS_NO_UDEV")) {
+    if (file && strstr(file, "libudev") && getenv("ATARIVCS_FAKE_UDEV")) {
         static int told;
         if (!told++)
-            fprintf(stderr, "atarivcs shim: no %s for the game\n", file);
-        return NULL;
+            fprintf(stderr, "atarivcs shim: the shim's udev for %s\n", file);
+        return &atarivcs_fake_udev_handle;
     }
     return real ? real(file, flags) : NULL;
 }
 
+EXPORT int dlclose(void *lib)
+{
+    static int (*real)(void *);
+    if (lib == &atarivcs_fake_udev_handle)
+        return 0;
+    if (!real) {
+        real = dlvsym(RTLD_NEXT, "dlclose", "GLIBC_2.34");
+        if (!real)
+            real = dlvsym(RTLD_NEXT, "dlclose", "GLIBC_2.2.5");
+    }
+    return real ? real(lib) : 0;
+}
+
 EXPORT void *dlsym(void *lib, const char *name)
 {
+    if (lib == &atarivcs_fake_udev_handle)
+        return atarivcs_fake_udev_symbol(name);
     find_real_dlsym();
     if (!real_dlsym)
         return NULL;
