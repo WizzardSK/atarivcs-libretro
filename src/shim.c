@@ -444,6 +444,8 @@ static const unsigned pad_abs[] = { ABS_X, ABS_Y, ABS_Z, ABS_RX, ABS_RY, ABS_RZ,
 
 typedef struct {
     int fd;
+    int flags;
+    unsigned reads, with_events;
     uint32_t buttons;
     int32_t abs[ABS_MAX + 1];
 } pad_fd;
@@ -543,6 +545,8 @@ static int open_pad(int flags)
         if (!pad_fds[i].fd) {
             memset(&pad_fds[i], 0, sizeof(pad_fds[i]));
             pad_fds[i].fd = fd + 1;
+            pad_fds[i].flags = flags;
+            fprintf(stderr, "atarivcs shim: pad opened as fd %d (slot %zu, flags 0x%x)\n", fd, i, (unsigned)flags);
             for (size_t a = 0; a < sizeof(pad_abs) / sizeof(pad_abs[0]); a++)
                 pad_fds[i].abs[pad_abs[a]] = pad_abs_value(pad_abs[a]);
             pad_fds[i].buttons = shared->buttons;
@@ -583,8 +587,10 @@ EXPORT int close(int fd)
 {
     static int (*real)(int);
     pad_fd *p = pad_of(fd);
-    if (p)
+    if (p) {
+        fprintf(stderr, "atarivcs shim: pad fd %d closed after %u reads\n", fd, p->reads);
         p->fd = 0;
+    }
     if (!real)
         real = lookup(NULL, "close");
     return real ? real(fd) : -1;
@@ -733,11 +739,10 @@ EXPORT ssize_t read(int fd, void *buf, size_t count)
             p->abs[pad_abs[a]] = v;
         }
     }
-    static unsigned reads, with_events;
-    reads++;
-    with_events += n != 0;
-    if (reads % 600 == 1)
-        fprintf(stderr, "atarivcs shim: pad reads %u, with events %u\n", reads, with_events);
+    p->reads++;
+    p->with_events += n != 0;
+    if (p->reads % 600 == 1 || (n && p->with_events <= 3))
+        fprintf(stderr, "atarivcs shim: pad fd %d: reads %u, with events %u\n", fd, p->reads, p->with_events);
     if (!n) {
         errno = EAGAIN;
         return -1;
