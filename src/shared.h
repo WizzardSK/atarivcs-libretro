@@ -38,9 +38,10 @@ typedef struct atarivcs_shared {
     volatile uint8_t hat;
     uint8_t pad0[3];
 
-    /* One more each retro_run: the game's swaps wait for it, so the game
-     * runs at RetroArch's pace (its window, behind RetroArch's, is not held
-     * by vsync) and stops while RetroArch is paused */
+    /* One more each retro_run: the game's swaps wait for it (at most 100 ms),
+     * so the game runs at RetroArch's pace - its window, behind RetroArch's,
+     * is not held by vsync, and Bloo Kid ran at ~200 fps - and slows to
+     * 10 fps while RetroArch is paused */
     volatile uint32_t run_seq;
 
     /* Frame, written by the shim at each buffer swap. frame_seq is odd while
