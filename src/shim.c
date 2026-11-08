@@ -777,6 +777,17 @@ static struct {
     { "XIfEvent", (void *)XIfEvent, NULL, 0 },
     { "XPending", (void *)XPending, NULL, 0 },
     { "XEventsQueued", (void *)XEventsQueued, NULL, 0 },
+    /* The pad's files, for code that looks libc's functions up (Mono's
+     * P/Invoke) */
+    { "open", (void *)open, NULL, 0 },
+    { "open64", (void *)open64, NULL, 0 },
+    { "close", (void *)close, NULL, 0 },
+    { "read", (void *)read, NULL, 0 },
+    { "ioctl", (void *)ioctl, NULL, 0 },
+    { "__xstat", (void *)__xstat, NULL, 0 },
+    { "__xstat64", (void *)__xstat64, NULL, 0 },
+    { "stat", (void *)stat, NULL, 0 },
+    { "dlopen", (void *)dlopen, NULL, 0 },
 };
 
 static void *real_of(const char *symbol)
@@ -807,6 +818,27 @@ static void *swap_in(void *lib, const char *name, void *found)
             return hooks[i].mine;
         }
     return found;
+}
+
+/* No libudev for the game when the core asks (ATARIVCS_NO_UDEV): Rewired's
+ * native Linux input finds its pads through udev only, which knows nothing
+ * of the shim's pad, and without it falls back to Unity's input, whose SDL
+ * takes the pad from SDL_JOYSTICK_DEVICE */
+EXPORT void *dlopen(const char *file, int flags)
+{
+    static void *(*real)(const char *, int);
+    if (!real) {
+        real = dlvsym(RTLD_NEXT, "dlopen", "GLIBC_2.34");
+        if (!real)
+            real = dlvsym(RTLD_NEXT, "dlopen", "GLIBC_2.2.5");
+    }
+    if (file && strstr(file, "libudev") && getenv("ATARIVCS_NO_UDEV")) {
+        static int told;
+        if (!told++)
+            fprintf(stderr, "atarivcs shim: no %s for the game\n", file);
+        return NULL;
+    }
+    return real ? real(file, flags) : NULL;
 }
 
 EXPORT void *dlsym(void *lib, const char *name)
