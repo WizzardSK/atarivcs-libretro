@@ -285,7 +285,7 @@ static bool setup_audio(void)
         return false;
     }
     /* Open for reading first, so the game's open for writing does not wait */
-    audio_fd = open(audio_fifo, O_RDONLY | O_NONBLOCK);
+    audio_fd = open(audio_fifo, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
     FILE *f = fopen(audio_conf, "w");
     if (audio_fd < 0 || !f) {
         if (f)
@@ -376,6 +376,22 @@ static void play_audio(void)
     }
     size_t n = audio_frames < PER_RUN ? audio_frames : PER_RUN;
     memcpy(out, audio_ring, n * 2 * sizeof(int16_t));
+
+    /* Every ten seconds: how much of it the game played, and how loud */
+    static unsigned runs;
+    static size_t played;
+    static int peak;
+    played += n;
+    for (size_t i = 0; i < n * 2; i++)
+        if (abs(out[i]) > peak)
+            peak = abs(out[i]);
+    if (++runs == FPS * 10) {
+        LOG_I("atarivcs: last 10 s: %zu of %u sound frames from the game, peak %d\n",
+              played, (unsigned)(PER_RUN * runs), peak);
+        runs = 0;
+        played = 0;
+        peak = 0;
+    }
     memset(out + n * 2, 0, (PER_RUN - n) * 2 * sizeof(int16_t));
     memmove(audio_ring, audio_ring + n * 2, (audio_frames - n) * 2 * sizeof(int16_t));
     audio_frames -= n;
