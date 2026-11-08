@@ -349,6 +349,93 @@ static unsigned pad_keys_down(void)
     return down;
 }
 
+/* ---- XInput2 raw motion: Unity's mouse (its Input System's delta, and
+ * Rewired's mouse axes) is XI_RawMotion on the root window, a GenericEvent
+ * whose data XGetEventData hands out. The shim queues its own, with the
+ * pointer's movement as valuator 0, and answers XGetEventData for it. ---- */
+
+#define GenericEvent 35
+#define XI_RawMotion 17
+#define OUR_COOKIE 0x41544152u /* "ATAR" */
+
+typedef struct {
+    int type; unsigned long serial; int send_event; void *display; int extension; int evtype;
+    unsigned int cookie; void *data;
+} generic_cookie;
+
+typedef struct {
+    int type; unsigned long serial; int send_event; void *display; int extension; int evtype;
+    unsigned long time; int deviceid, sourceid, detail, flags;
+    int mask_len; unsigned char *mask; double *values;
+    double *raw_values;
+} xi_raw_event;
+
+static xi_raw_event raw_events[32];
+static unsigned char raw_masks[32][4];
+static double raw_values[32][2];
+static unsigned raw_next;
+static int xi_opcode = -1;
+
+static void send_raw_motion(void *dpy, int dx)
+{
+    if (xi_opcode < 0) {
+        int (*query)(void *, const char *, int *, int *, int *) = real_of("XQueryExtension");
+        int op = 0, ev = 0, err = 0;
+        xi_opcode = query && query(dpy, "XInputExtension", &op, &ev, &err) ? op : 0;
+    }
+    if (!xi_opcode)
+        return;
+    unsigned i = raw_next++ % 32;
+    xi_raw_event *r = &raw_events[i];
+    memset(r, 0, sizeof(*r));
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    r->type = GenericEvent;
+    r->display = dpy;
+    r->extension = xi_opcode;
+    r->evtype = XI_RawMotion;
+    r->time = (unsigned long)ts.tv_sec * 1000 + (unsigned long)ts.tv_nsec / 1000000;
+    r->deviceid = 2; /* the master pointer */
+    r->sourceid = 2;
+    memset(raw_masks[i], 0, sizeof(raw_masks[i]));
+    raw_masks[i][0] = 1; /* valuator 0: x */
+    raw_values[i][0] = dx;
+    r->mask_len = 1;
+    r->mask = raw_masks[i];
+    r->values = raw_values[i];
+    r->raw_values = raw_values[i];
+
+    generic_cookie *c = (generic_cookie *)owed[owed_count++].bytes;
+    memset(c, 0, XEVENT_SIZE);
+    c->type = GenericEvent;
+    c->display = dpy;
+    c->extension = xi_opcode;
+    c->evtype = XI_RawMotion;
+    c->cookie = OUR_COOKIE + i;
+}
+
+EXPORT int XGetEventData(void *dpy, generic_cookie *c)
+{
+    if (c && c->type == GenericEvent && c->cookie - OUR_COOKIE < 32 && c->extension == xi_opcode &&
+        c->evtype == XI_RawMotion && !c->data) {
+        c->data = &raw_events[c->cookie - OUR_COOKIE];
+        return 1;
+    }
+    int (*real)(void *, generic_cookie *) = real_of("XGetEventData");
+    return real ? real(dpy, c) : 0;
+}
+
+EXPORT void XFreeEventData(void *dpy, generic_cookie *c)
+{
+    if (c && c->data >= (void *)raw_events && c->data < (void *)(raw_events + 32)) {
+        c->data = NULL;
+        return;
+    }
+    void (*real)(void *, generic_cookie *) = real_of("XFreeEventData");
+    if (real)
+        real(dpy, c);
+}
+
 /* The pointer: x follows the core's mouse_x (RetroArch's mouse, the
  * Classic Controller's ring), kept in the window; y stays low in it, where
  * a paddle is */
@@ -366,10 +453,12 @@ static void send_motion(void *dpy)
         started = 1;
         return;
     }
-    if (now == last || owed_count == (int)(sizeof(owed) / sizeof(owed[0])))
+    if (now == last || owed_count + 1 >= (int)(sizeof(owed) / sizeof(owed[0])))
         return;
-    pointer_x += now - last;
+    const int dx = now - last;
+    pointer_x += dx;
     last = now;
+    send_raw_motion(dpy, dx);
     if (pointer_x < 0)
         pointer_x = 0;
     if (pointer_x > 1279)
@@ -1131,6 +1220,9 @@ static struct {
     { "XGetInputFocus", (void *)XGetInputFocus, NULL, 0 },
     { "XQueryPointer", (void *)XQueryPointer, NULL, 0 },
     { "XISelectEvents", (void *)XISelectEvents, NULL, 0 },
+    { "XGetEventData", (void *)XGetEventData, NULL, 0 },
+    { "XFreeEventData", (void *)XFreeEventData, NULL, 0 },
+    { "XQueryExtension", NULL, NULL, 0 },
     { "XGetWindowProperty", (void *)XGetWindowProperty, NULL, 0 },
     { "XInternAtom", NULL, NULL, 0 },
 };
