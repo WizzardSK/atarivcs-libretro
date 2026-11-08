@@ -256,7 +256,7 @@ typedef struct { int type; unsigned long serial; int send_event; void *display; 
 typedef struct { int type; unsigned long serial; int send_event; void *display; unsigned long window; int x, y, width, height, count; } expose_event;
 typedef struct { int type; unsigned long serial; int send_event; void *display; unsigned long window; int mode, detail; } focus_event;
 
-static union { char bytes[XEVENT_SIZE]; long align; } owed[8];
+static union { char bytes[XEVENT_SIZE]; long align; } owed[32];
 static int owed_count;
 
 static void owe(int type, void *dpy, unsigned long w)
@@ -315,11 +315,84 @@ static int map_window(const char *name, void *dpy, unsigned long w)
 EXPORT int XMapWindow(void *dpy, unsigned long w) { return map_window("XMapWindow", dpy, w); }
 EXPORT int XMapRaised(void *dpy, unsigned long w) { return map_window("XMapRaised", dpy, w); }
 
+/* ---- The pad as keys too. Rewired in Breakout Recharged never moved the
+ * paddle with the pad, and the game has a keyboard map: the D-pad (or the
+ * left stick) comes as the arrow keys and A as space, KeyPress and
+ * KeyRelease for the game's window as the pad changes. Read where the game
+ * reads its events, so on its own thread. ---- */
+
+#define KeyPress 2
+#define KeyRelease 3
+
+typedef struct {
+    int type; unsigned long serial; int send_event; void *display; unsigned long window, root, subwindow, time;
+    int x, y, x_root, y_root; unsigned int state, keycode; int same_screen;
+} key_event;
+
+static const struct { unsigned long keysym; } pad_key_syms[] = {
+    { 0xff51 /* Left */ }, { 0xff52 /* Up */ }, { 0xff53 /* Right */ }, { 0xff54 /* Down */ }, { 0x20 /* space */ },
+};
+#define PAD_KEY_COUNT (sizeof(pad_key_syms) / sizeof(pad_key_syms[0]))
+
+static unsigned pad_keys_down(void)
+{
+    if (!shared)
+        return 0;
+    int hat = shared->hat, lx = shared->axes[ATARIVCS_AXIS_LX], ly = shared->axes[ATARIVCS_AXIS_LY];
+    unsigned down = 0;
+    if ((hat & ATARIVCS_HAT_LEFT) || lx < -16384) down |= 1u << 0;
+    if ((hat & ATARIVCS_HAT_UP) || ly < -16384) down |= 1u << 1;
+    if ((hat & ATARIVCS_HAT_RIGHT) || lx > 16384) down |= 1u << 2;
+    if ((hat & ATARIVCS_HAT_DOWN) || ly > 16384) down |= 1u << 3;
+    if (shared->buttons & (1u << ATARIVCS_BTN_A)) down |= 1u << 4;
+    return down;
+}
+
+static void send_keys(void *dpy)
+{
+    static unsigned was;
+    static unsigned char codes[PAD_KEY_COUNT];
+    static unsigned long root;
+    if (!game_window || !dpy)
+        return;
+    unsigned now = pad_keys_down(), changed = now ^ was;
+    if (!changed)
+        return;
+    if (!codes[0]) {
+        unsigned char (*to_code)(void *, unsigned long) = real_of("XKeysymToKeycode");
+        unsigned long (*root_of)(void *) = real_of("XDefaultRootWindow");
+        for (unsigned i = 0; i < PAD_KEY_COUNT && to_code; i++)
+            codes[i] = to_code(dpy, pad_key_syms[i].keysym);
+        root = root_of ? root_of(dpy) : 0;
+        if (!codes[0]) {
+            was = now;
+            return;
+        }
+    }
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    for (unsigned i = 0; i < PAD_KEY_COUNT; i++) {
+        if (!(changed & (1u << i)) || !codes[i] || owed_count == (int)(sizeof(owed) / sizeof(owed[0])))
+            continue;
+        key_event *k = (key_event *)owed[owed_count++].bytes;
+        memset(k, 0, XEVENT_SIZE);
+        k->type = (now & (1u << i)) ? KeyPress : KeyRelease;
+        k->display = dpy;
+        k->window = game_window;
+        k->root = root;
+        k->time = (unsigned long)ts.tv_sec * 1000 + (unsigned long)ts.tv_nsec / 1000000;
+        k->keycode = codes[i];
+        k->same_screen = 1;
+        was ^= 1u << i;
+    }
+}
+
 EXPORT int XNextEvent(void *dpy, void *ev)
 {
     static int (*real)(void *, void *);
     if (!real)
         real = next("XNextEvent");
+    send_keys(dpy);
     if (owed_count) {
         pop_owed(0, ev);
         return 0;
@@ -376,6 +449,7 @@ EXPORT int XPending(void *dpy)
     static int (*real)(void *);
     if (!real)
         real = next("XPending");
+    send_keys(dpy);
     return owed_count + (real ? real(dpy) : 0);
 }
 
@@ -384,6 +458,7 @@ EXPORT int XEventsQueued(void *dpy, int mode)
     static int (*real)(void *, int);
     if (!real)
         real = next("XEventsQueued");
+    send_keys(dpy);
     return owed_count + (real ? real(dpy, mode) : 0);
 }
 
