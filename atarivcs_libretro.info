@@ -1,0 +1,33 @@
+# Software Information
+display_name = "Atari - VCS (Atari VCS)"
+authors = "WizzardSK"
+supported_extensions = "ini"
+corename = "Atari VCS"
+categories = "Game"
+license = "GPLv3"
+permissions = ""
+display_version = "v0.1"
+
+# Hardware Information
+manufacturer = "Atari"
+systemname = "VCS"
+systemid = "atari_vcs"
+
+# Libretro Features
+database = "Atari - VCS"
+supports_no_game = "false"
+savestate = "false"
+cheats = "false"
+input_descriptors = "true"
+memory_descriptors = "false"
+libretro_saves = "false"
+core_options = "false"
+load_subsystem = "false"
+hw_render = "false"
+needs_fullpath = "true"
+block_extract = "true"
+disk_control = "false"
+is_experimental = "true"
+
+notes = "(!) Load the bundle.ini of a game from the Atari VCS (2021) store, unpacked.|(!) The games are Linux x86-64 programs: they run directly on x86-64 Linux and through box64 on aarch64 Linux (box64 from ATARIVCS_BOX64 or PATH).|(!) No savestates or rewind: the game runs as its own process."
+description = "Plays the native Linux games of the Atari VCS (2021) store in RetroArch. The game runs as its own process with a small library preloaded into it, which hands every frame and its sound to RetroArch and gives it RetroArch's controller as a gamepad, so the games play with any controller or the keyboard."

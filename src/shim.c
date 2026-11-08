@@ -389,6 +389,21 @@ static void send_motion(void *dpy)
     m->same_screen = 1; /* is_hint stays 0, in keycode's place */
 }
 
+/* XInput2: what the game asks for, to learn where Unity's mouse comes from */
+typedef struct { int deviceid; int mask_len; unsigned char *mask; } xi_event_mask;
+
+EXPORT int XISelectEvents(void *dpy, unsigned long w, xi_event_mask *masks, int num_masks)
+{
+    int (*real)(void *, unsigned long, xi_event_mask *, int) = real_of("XISelectEvents");
+    for (int i = 0; i < num_masks && masks; i++) {
+        unsigned bits = 0;
+        for (int b = 0; b < masks[i].mask_len && b < 4; b++)
+            bits |= (unsigned)masks[i].mask[b] << (8 * b);
+        fprintf(stderr, "atarivcs shim: XISelectEvents window 0x%lx device %d events 0x%x\n", w, masks[i].deviceid, bits);
+    }
+    return real ? real(dpy, w, masks, num_masks) : 0;
+}
+
 EXPORT int XQueryPointer(void *dpy, unsigned long w, unsigned long *root, unsigned long *child, int *root_x,
                          int *root_y, int *win_x, int *win_y, unsigned int *mask)
 {
@@ -1115,6 +1130,7 @@ static struct {
     { "XGetWindowAttributes", (void *)XGetWindowAttributes, NULL, 0 },
     { "XGetInputFocus", (void *)XGetInputFocus, NULL, 0 },
     { "XQueryPointer", (void *)XQueryPointer, NULL, 0 },
+    { "XISelectEvents", (void *)XISelectEvents, NULL, 0 },
     { "XGetWindowProperty", (void *)XGetWindowProperty, NULL, 0 },
     { "XInternAtom", NULL, NULL, 0 },
 };

@@ -9,15 +9,19 @@ What the shim does to the game: it reads the back buffer at each `glXSwapBuffers
 ## Debugging
 
 - `touch /tmp/atarivcs-dump`: the frame shown is written to `/tmp/atarivcs-frame.ppm`.
-- `echo down > /tmp/atarivcs-press`: a RetroPad button (up, down, left, right, a, b, x, y, start, select) held for 10 frames.
+- `echo down > /tmp/atarivcs-press`: a RetroPad button (up, down, left, right, a, b, x, y, l, r, start, select; mleft and mright move the pointer) held for 10 frames.
 - The shim writes a line to the game's stderr every 120 swaps.
 
 ## Use
 
-- Put `atarivcs_libretro.so` and `atarivcs_shim_x86_64.so` in RetroArch's cores folder (or the shim in `system/atarivcs/`).
+- Put `atarivcs_libretro.so` in RetroArch's cores folder (and `atarivcs_libretro.info` in its info folder). The core carries the x86-64 shim and writes it out for each game; an `atarivcs_shim_x86_64.so` beside the core or in `system/atarivcs/` is taken instead.
 - Load a game's `bundle.ini` (from the unpacked store package).
 - On aarch64, box64 is taken from `ATARIVCS_BOX64`, else `~/.cache/gameflix/box64` (with the x86-64 libraries gameflix sets up beside it), else `PATH`.
 
 ## Controls
 
 The RetroPad is the game's Xbox 360 layout: B = A, A = B, Y = X, X = Y, L/R = LB/RB, Select = Back, Start, L2/R2 triggers, sticks, D-pad as the hat.
+
+## Building
+
+`make` builds the x86-64 shim and the core with the shim inside it. On a host other than x86-64 the shim needs an x86-64 cross compiler (`SHIM_CC`, by default `x86_64-linux-gnu-gcc`; Debian and Ubuntu: `gcc-x86-64-linux-gnu`). `.gitlab-ci.yml` is the libretro buildbot's recipe (Linux x86-64 and aarch64).

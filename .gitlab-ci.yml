@@ -1,0 +1,52 @@
+# DESCRIPTION: GitLab CI/CD for libRetro (NOT FOR GitLab-proper)
+#
+# This recipe is consumed by the Libretro buildbot so the core can be
+# distributed through RetroArch's Online Updater > Core Downloader.
+#
+# Linux x64 and aarch64 only: the store's games are Linux x86-64 programs.
+# The core carries the x86-64 library it preloads into a game
+# (src/shim_blob.S); the aarch64 job builds that with an x86-64 cross
+# compiler, which the template's image does not have.
+
+# Core definitions
+.core-defs:
+  variables:
+    CORENAME: atarivcs
+
+.core-defs-aarch64:
+  extends: .core-defs
+  before_script:
+    - export NUMPROC=$(($(nproc)/5))
+    - '[ "$NUMPROC" -ge 1 ] || NUMPROC=1'
+    - apt-get update -qq
+    - DEBIAN_FRONTEND=noninteractive apt-get install -yqq --no-install-recommends gcc-x86-64-linux-gnu libc6-dev-amd64-cross
+
+include:
+  ################################## DESKTOP ##################################
+  # Linux
+  - project: 'libretro-infrastructure/ci-templates'
+    file: '/linux-x64.yml'
+  - project: 'libretro-infrastructure/ci-templates'
+    file: '/linux-aarch64.yml'
+
+# Stages for building
+stages:
+  - build-prepare
+  - build-shared
+
+##############################################################################
+#################################### STAGES ##################################
+##############################################################################
+#
+################################### DESKTOP #################################
+# Linux 64-bit
+libretro-build-linux-x64:
+  extends:
+    - .libretro-linux-x64-make-default
+    - .core-defs
+
+# Linux aarch64
+libretro-build-linux-aarch64:
+  extends:
+    - .libretro-linux-aarch64-make-default
+    - .core-defs-aarch64

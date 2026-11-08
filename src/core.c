@@ -194,6 +194,47 @@ static void core_dir(char *out, size_t size)
     }
 }
 
+/* The shim the core carries (shim_blob.S), written out for one game */
+extern const unsigned char atarivcs_shim_blob[], atarivcs_shim_blob_end[];
+static char written_shim[64];
+
+static bool write_shim(char *out, size_t size)
+{
+    snprintf(written_shim, sizeof(written_shim), "/tmp/atarivcs-%d-shim.so", (int)getpid());
+    unlink(written_shim);
+    int fd = open(written_shim, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0755);
+    if (fd < 0) {
+        written_shim[0] = '\0';
+        return false;
+    }
+    const unsigned char *p = atarivcs_shim_blob;
+    size_t left = (size_t)(atarivcs_shim_blob_end - atarivcs_shim_blob);
+    while (left) {
+        ssize_t w = write(fd, p, left);
+        if (w <= 0) {
+            close(fd);
+            unlink(written_shim);
+            written_shim[0] = '\0';
+            return false;
+        }
+        p += w;
+        left -= (size_t)w;
+    }
+    close(fd);
+    snprintf(out, size, "%s", written_shim);
+    return true;
+}
+
+static void remove_written_shim(void)
+{
+    if (written_shim[0]) {
+        unlink(written_shim);
+        written_shim[0] = '\0';
+    }
+}
+
+/* A shim file beside the core or in system/atarivcs (one being worked on)
+ * goes first, else the one the core carries */
 static bool find_shim(char *out, size_t size)
 {
     char dir[PATH_MAX];
@@ -207,7 +248,7 @@ static bool find_shim(char *out, size_t size)
         if (is_file(out))
             return true;
     }
-    return false;
+    return write_shim(out, size);
 }
 
 #if !defined(__x86_64__)
@@ -493,7 +534,7 @@ bool retro_load_game(const struct retro_game_info *game)
 
     char shim[PATH_MAX];
     if (!find_shim(shim, sizeof(shim))) {
-        LOG_E("atarivcs: %s is not beside the core nor in system/atarivcs\n", SHIM_NAME);
+        LOG_E("atarivcs: no %s beside the core nor in system/atarivcs, and the core's own could not be written\n", SHIM_NAME);
         return false;
     }
 
@@ -551,6 +592,7 @@ bool retro_load_game(const struct retro_game_info *game)
         destroy_shared();
         close_audio();
         atarivcs_daemon_stop();
+        remove_written_shim();
         return false;
     }
 
@@ -570,6 +612,7 @@ bool retro_load_game(const struct retro_game_info *game)
         destroy_shared();
         close_audio();
         atarivcs_daemon_stop();
+        remove_written_shim();
         return false;
     }
     if (child == 0) {
@@ -645,6 +688,7 @@ void retro_unload_game(void)
     destroy_shared();
     close_audio();
     atarivcs_daemon_stop();
+    remove_written_shim();
     free(frame);
     frame = NULL;
     have_frame = false;
@@ -817,6 +861,7 @@ static void debug_press(void)
             { "a", RETRO_DEVICE_ID_JOYPAD_A }, { "b", RETRO_DEVICE_ID_JOYPAD_B },
             { "x", RETRO_DEVICE_ID_JOYPAD_X }, { "y", RETRO_DEVICE_ID_JOYPAD_Y },
             { "start", RETRO_DEVICE_ID_JOYPAD_START }, { "select", RETRO_DEVICE_ID_JOYPAD_SELECT },
+            { "l", RETRO_DEVICE_ID_JOYPAD_L }, { "r", RETRO_DEVICE_ID_JOYPAD_R },
             { "mleft", 1000 }, { "mright", 1001 },
         };
         for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
@@ -832,6 +877,7 @@ static void debug_press(void)
         [RETRO_DEVICE_ID_JOYPAD_B] = 1u << ATARIVCS_BTN_A, [RETRO_DEVICE_ID_JOYPAD_A] = 1u << ATARIVCS_BTN_B,
         [RETRO_DEVICE_ID_JOYPAD_Y] = 1u << ATARIVCS_BTN_X, [RETRO_DEVICE_ID_JOYPAD_X] = 1u << ATARIVCS_BTN_Y,
         [RETRO_DEVICE_ID_JOYPAD_START] = 1u << ATARIVCS_BTN_START, [RETRO_DEVICE_ID_JOYPAD_SELECT] = 1u << ATARIVCS_BTN_BACK,
+        [RETRO_DEVICE_ID_JOYPAD_L] = 1u << ATARIVCS_BTN_LB, [RETRO_DEVICE_ID_JOYPAD_R] = 1u << ATARIVCS_BTN_RB,
     };
     switch (id) {
     /* the D-pad as write_pad gives it: the hat and the left stick */
