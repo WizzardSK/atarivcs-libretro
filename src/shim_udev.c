@@ -362,6 +362,18 @@ void *atarivcs_fake_udev_symbol(const char *name)
     for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); i++)
         if (!strcmp(table[i].name, name))
             return table[i].fn;
+    /* Mono's P/Invoke also looks for the name with W or A after it */
+    const size_t len = strlen(name);
+    if (name[len - 1] == 'W' || name[len - 1] == 'A') {
+        char bare[128];
+        if (len - 1 < sizeof(bare)) {
+            memcpy(bare, name, len - 1);
+            bare[len - 1] = '\0';
+            for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); i++)
+                if (!strcmp(table[i].name, bare))
+                    return table[i].fn;
+        }
+    }
     if (logged++ < 20)
         fprintf(stderr, "atarivcs shim: udev %s answers nothing\n", name);
     return (void *)f_null;
