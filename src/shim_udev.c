@@ -207,6 +207,7 @@ static void *f_list_entry_get_by_name(void *e, const char *name)
 static void *f_device_new_from_syspath(void *u, const char *path)
 {
     (void)u;
+    fprintf(stderr, "atarivcs shim: udev device %s\n", path ? path : "-");
     return by_syspath(path);
 }
 
@@ -248,7 +249,11 @@ static const char *f_device_get_sysnum(void *d)
     return *p ? p : NULL;
 }
 static dev_t f_device_get_devnum(void *d) { return d == &event_dev ? makedev(PAD_MAJOR, PAD_MINOR) : 0; }
-static void *f_device_get_parent(void *d) { return d ? ((device *)d)->parent : NULL; }
+static void *f_device_get_parent(void *d)
+{
+    fprintf(stderr, "atarivcs shim: udev parent of %s\n", d ? ((device *)d)->sysname : "-");
+    return d ? ((device *)d)->parent : NULL;
+}
 
 static void *f_device_get_parent_with_subsystem_devtype(void *d, const char *subsystem, const char *devtype)
 {
@@ -390,8 +395,10 @@ void *atarivcs_fake_udev_symbol(const char *name)
     if (!name || strncmp(name, "udev_", 5))
         return NULL;
     for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); i++)
-        if (!strcmp(table[i].name, name))
+        if (!strcmp(table[i].name, name)) {
+            fprintf(stderr, "atarivcs shim: udev %s looked up\n", name);
             return table[i].fn;
+        }
     /* Mono's P/Invoke also looks for the name with W or A after it */
     const size_t len = strlen(name);
     if (name[len - 1] == 'W' || name[len - 1] == 'A') {
