@@ -153,6 +153,23 @@ static void capture(void *dpy, unsigned long drawable)
         bind_framebuffer(GL_READ_FRAMEBUFFER, (unsigned int)read_fbo);
 }
 
+/* Until RetroArch has run another frame; at most 100 ms, so a core that
+ * went away does not hold the game for good */
+static void wait_for_run(void)
+{
+    static uint32_t seen;
+    if (!shared)
+        return;
+    for (int i = 0; i < 200; i++) {
+        uint32_t now = __atomic_load_n(&shared->run_seq, __ATOMIC_ACQUIRE);
+        if (now != seen) {
+            seen = now;
+            return;
+        }
+        usleep(500);
+    }
+}
+
 EXPORT void glXSwapBuffers(void *dpy, unsigned long drawable)
 {
     static void (*real)(void *, unsigned long);
@@ -161,6 +178,7 @@ EXPORT void glXSwapBuffers(void *dpy, unsigned long drawable)
     capture(dpy, drawable);
     if (real)
         real(dpy, drawable);
+    wait_for_run();
 }
 
 /* ---- Keyboard and pointer: left to RetroArch, which plays the pad. Focus

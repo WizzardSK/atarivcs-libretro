@@ -492,11 +492,60 @@ static void dump_frame_if_asked(void)
     LOG_I("atarivcs: frame %ux%u dumped\n", cur_w, cur_h);
 }
 
+/* Debugging the pad without a keyboard: /tmp/atarivcs-press names a RetroPad
+ * button (up, down, left, right, a, b, x, y, start, select), held for 10
+ * frames, then the file is removed */
+static void debug_press(void)
+{
+    static int held;
+    static unsigned id;
+    if (!held) {
+        FILE *f = fopen("/tmp/atarivcs-press", "r");
+        if (!f)
+            return;
+        char name[16] = { 0 };
+        if (fscanf(f, "%15s", name) != 1)
+            name[0] = '\0';
+        fclose(f);
+        unlink("/tmp/atarivcs-press");
+        static const struct { const char *name; unsigned id; } names[] = {
+            { "up", RETRO_DEVICE_ID_JOYPAD_UP }, { "down", RETRO_DEVICE_ID_JOYPAD_DOWN },
+            { "left", RETRO_DEVICE_ID_JOYPAD_LEFT }, { "right", RETRO_DEVICE_ID_JOYPAD_RIGHT },
+            { "a", RETRO_DEVICE_ID_JOYPAD_A }, { "b", RETRO_DEVICE_ID_JOYPAD_B },
+            { "x", RETRO_DEVICE_ID_JOYPAD_X }, { "y", RETRO_DEVICE_ID_JOYPAD_Y },
+            { "start", RETRO_DEVICE_ID_JOYPAD_START }, { "select", RETRO_DEVICE_ID_JOYPAD_SELECT },
+        };
+        for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+            if (!strcmp(name, names[i].name)) {
+                id = names[i].id;
+                held = 10;
+                LOG_I("atarivcs: debug press %s\n", name);
+            }
+        return;
+    }
+    held--;
+    static const unsigned bits[] = {
+        [RETRO_DEVICE_ID_JOYPAD_B] = 1u << ATARIVCS_BTN_A, [RETRO_DEVICE_ID_JOYPAD_A] = 1u << ATARIVCS_BTN_B,
+        [RETRO_DEVICE_ID_JOYPAD_Y] = 1u << ATARIVCS_BTN_X, [RETRO_DEVICE_ID_JOYPAD_X] = 1u << ATARIVCS_BTN_Y,
+        [RETRO_DEVICE_ID_JOYPAD_START] = 1u << ATARIVCS_BTN_START, [RETRO_DEVICE_ID_JOYPAD_SELECT] = 1u << ATARIVCS_BTN_BACK,
+    };
+    switch (id) {
+    case RETRO_DEVICE_ID_JOYPAD_UP: shared->hat |= ATARIVCS_HAT_UP; break;
+    case RETRO_DEVICE_ID_JOYPAD_DOWN: shared->hat |= ATARIVCS_HAT_DOWN; break;
+    case RETRO_DEVICE_ID_JOYPAD_LEFT: shared->hat |= ATARIVCS_HAT_LEFT; break;
+    case RETRO_DEVICE_ID_JOYPAD_RIGHT: shared->hat |= ATARIVCS_HAT_RIGHT; break;
+    default: shared->buttons |= bits[id]; break;
+    }
+}
+
 void retro_run(void)
 {
     input_poll_cb();
-    if (shared)
+    if (shared) {
         write_pad();
+        debug_press();
+        __atomic_add_fetch(&shared->run_seq, 1, __ATOMIC_ACQ_REL);
+    }
 
     if (child > 0) {
         int status;
