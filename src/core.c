@@ -45,7 +45,7 @@ static bool have_frame;
 
 /* Sound: the game's OpenAL (openal-soft) writes a WAV stream to a FIFO
  * through its "wave" backend, at RetroArch's rate; the core passes it on */
-static char audio_fifo[128], audio_conf[128];
+static char audio_fifo[128], audio_conf[128], alsa_conf[128];
 static int audio_fd = -1;
 static bool audio_header_done;
 static uint8_t audio_header[256];
@@ -309,6 +309,23 @@ static bool setup_audio(void)
     fprintf(f, "[general]\ndrivers = wave\nfrequency = %d\nchannels = stereo\nsample-type = int16\n"
                "[wave]\nfile = %s\n", SAMPLE_RATE, audio_fifo);
     fclose(f);
+
+    /* ALSA's default device writes to the same FIFO, at RetroArch's rate,
+     * for games that play through ALSA: Unity's FMOD does once PulseAudio
+     * is out of its reach (PULSE_SERVER, see retro_load_game). The FIFO
+     * paces them: its writes wait while the core has not read. A raw
+     * stream has no WAV header; take_audio_bytes passes over its first
+     * 256 bytes looking for one. */
+    snprintf(alsa_conf, sizeof(alsa_conf), "/tmp/atarivcs-%d.asound.conf", (int)getpid());
+    f = fopen(alsa_conf, "w");
+    if (f) {
+        fprintf(f, "pcm.!default {\n  type plug\n  slave { pcm \"atarivcs_fifo\"; format S16_LE; rate %d; channels 2 }\n}\n"
+                   "pcm.atarivcs_fifo {\n  type file\n  slave.pcm \"null\"\n  file \"%s\"\n  format \"raw\"\n}\n",
+                SAMPLE_RATE, audio_fifo);
+        fclose(f);
+    } else {
+        alsa_conf[0] = '\0';
+    }
     audio_header_done = false;
     audio_header_len = 0;
     audio_frames = 0;
@@ -329,6 +346,10 @@ static void close_audio(void)
     if (audio_conf[0]) {
         unlink(audio_conf);
         audio_conf[0] = '\0';
+    }
+    if (alsa_conf[0]) {
+        unlink(alsa_conf);
+        alsa_conf[0] = '\0';
     }
 }
 
@@ -538,6 +559,14 @@ bool retro_load_game(const struct retro_game_info *game)
         if (have_audio) {
             setenv("ALSOFT_CONF", audio_conf, 1);
             setenv("ALSOFT_DRIVERS", "wave", 1);
+            if (alsa_conf[0]) {
+                /* ALSA's own configuration, then the core's default device;
+                 * and no PulseAudio, which Unity's FMOD would take first */
+                char path[512];
+                snprintf(path, sizeof(path), "/usr/share/alsa/alsa.conf:%s", alsa_conf);
+                setenv("ALSA_CONFIG_PATH", path, 1);
+                setenv("PULSE_SERVER", "unix:/nonexistent-atarivcs", 1);
+            }
         }
 #if defined(__x86_64__)
         setenv("LD_PRELOAD", shim, 1);
