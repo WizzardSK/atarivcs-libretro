@@ -472,6 +472,26 @@ static bool take_frame(void)
     return true;
 }
 
+/* Debugging without a screenshot: while /tmp/atarivcs-dump exists, the
+ * frame shown goes to /tmp/atarivcs-frame.ppm and the request is removed */
+static void dump_frame_if_asked(void)
+{
+    if (!have_frame || access("/tmp/atarivcs-dump", F_OK) != 0)
+        return;
+    unlink("/tmp/atarivcs-dump");
+    FILE *f = fopen("/tmp/atarivcs-frame.ppm", "wb");
+    if (!f)
+        return;
+    fprintf(f, "P6\n%u %u\n255\n", cur_w, cur_h);
+    for (size_t i = 0; i < (size_t)cur_w * cur_h; i++) {
+        const uint32_t px = frame[i];
+        const unsigned char rgb[3] = { (unsigned char)(px >> 16), (unsigned char)(px >> 8), (unsigned char)px };
+        fwrite(rgb, 1, 3, f);
+    }
+    fclose(f);
+    LOG_I("atarivcs: frame %ux%u dumped\n", cur_w, cur_h);
+}
+
 void retro_run(void)
 {
     input_poll_cb();
@@ -495,6 +515,8 @@ void retro_run(void)
         static uint32_t black[64 * 64];
         video_cb(black, 64, 64, 64 * 4);
     }
+
+    dump_frame_if_asked();
 
     /* The game plays its own sound; silence keeps RetroArch's timing */
     static int16_t silence[SAMPLE_RATE / FPS * 2];
