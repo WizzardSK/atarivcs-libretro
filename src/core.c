@@ -504,17 +504,6 @@ bool retro_load_game(const struct retro_game_info *game)
         }
     }
 
-    /* A Unity game draws at the desktop's resolution, 1080p here; every
-     * frame is read back for RetroArch, and under box64 on a Chromebook
-     * that held its menus at 12 fps. 720p in a window, by the player's own
-     * arguments. */
-    bool unity = false;
-    {
-        char player[PATH_MAX * 2 + 32];
-        snprintf(player, sizeof(player), "%s/UnityPlayer.so", dir);
-        unity = is_file(player);
-    }
-
     child = fork();
     if (child < 0) {
         LOG_E("atarivcs: fork: %s\n", strerror(errno));
@@ -549,8 +538,7 @@ bool retro_load_game(const struct retro_game_info *game)
         if (script)
             execl("/bin/sh", "sh", program, (char *)NULL);
         else
-            execl(program, program, unity ? "-screen-width" : NULL, "1280", "-screen-height", "720",
-                  "-screen-fullscreen", "0", (char *)NULL);
+            execl(program, program, (char *)NULL);
 #else
         setenv("BOX64_LD_PRELOAD", shim, 1);
         setenv("BOX64_NOBANNER", "1", 1);
@@ -563,8 +551,7 @@ bool retro_load_game(const struct retro_game_info *game)
             setenv("BOX64_BASH", bash, 1);
             execl(box64, box64, bash, program, (char *)NULL);
         } else {
-            execl(box64, box64, program, unity ? "-screen-width" : NULL, "1280", "-screen-height", "720",
-                  "-screen-fullscreen", "0", (char *)NULL);
+            execl(box64, box64, program, (char *)NULL);
         }
 #endif
         _exit(127);
