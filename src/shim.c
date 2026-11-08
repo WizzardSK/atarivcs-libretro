@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "shared.h"
@@ -416,6 +417,326 @@ EXPORT uint8_t SDL_JoystickGetHat(void *j, int hat)
     if (j != &the_pad || !shared || hat != 0)
         return 0;
     return shared->hat;
+}
+
+/* ---- The pad for games with their own SDL inside (Unity): an evdev device
+ * at a path no real one has, named to their SDL in SDL_JOYSTICK_DEVICE (the
+ * core sets it). It answers stat, open, ioctl and read as an Xbox 360 pad
+ * (xpad) would; the fd behind it is /dev/null's. ---- */
+
+#include <errno.h>
+#include <stdarg.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
+#include <linux/input.h>
+
+#define PAD_PATH "/dev/input/atarivcs-pad"
+
+static const unsigned pad_keys[ATARIVCS_BTN_COUNT] = {
+    BTN_A, BTN_B, BTN_X, BTN_Y, BTN_TL, BTN_TR, BTN_SELECT, BTN_START, BTN_MODE, BTN_THUMBL, BTN_THUMBR,
+};
+static const unsigned pad_abs[] = { ABS_X, ABS_Y, ABS_Z, ABS_RX, ABS_RY, ABS_RZ, ABS_HAT0X, ABS_HAT0Y };
+
+typedef struct {
+    int fd;
+    uint32_t buttons;
+    int32_t abs[ABS_MAX + 1];
+} pad_fd;
+static pad_fd pad_fds[8];
+
+static pad_fd *pad_of(int fd)
+{
+    if (fd < 0)
+        return NULL;
+    for (size_t i = 0; i < sizeof(pad_fds) / sizeof(pad_fds[0]); i++)
+        if (pad_fds[i].fd == fd + 1)
+            return &pad_fds[i];
+    return NULL;
+}
+
+/* The pad now, as evdev values */
+static int32_t pad_abs_value(unsigned code)
+{
+    if (!shared)
+        return code == ABS_Z || code == ABS_RZ ? 0 : 0;
+    switch (code) {
+    case ABS_X: return shared->axes[ATARIVCS_AXIS_LX];
+    case ABS_Y: return shared->axes[ATARIVCS_AXIS_LY];
+    case ABS_RX: return shared->axes[ATARIVCS_AXIS_RX];
+    case ABS_RY: return shared->axes[ATARIVCS_AXIS_RY];
+    case ABS_Z: return (shared->axes[ATARIVCS_AXIS_LT] + 32768) >> 8;
+    case ABS_RZ: return (shared->axes[ATARIVCS_AXIS_RT] + 32768) >> 8;
+    case ABS_HAT0X: return (shared->hat & ATARIVCS_HAT_RIGHT) ? 1 : (shared->hat & ATARIVCS_HAT_LEFT) ? -1 : 0;
+    case ABS_HAT0Y: return (shared->hat & ATARIVCS_HAT_DOWN) ? 1 : (shared->hat & ATARIVCS_HAT_UP) ? -1 : 0;
+    }
+    return 0;
+}
+
+static int is_pad_path(const char *path)
+{
+    return shared && path && !strcmp(path, PAD_PATH);
+}
+
+static void fill_pad_stat(struct stat *st)
+{
+    memset(st, 0, sizeof(*st));
+    st->st_mode = S_IFCHR | 0660;
+    st->st_rdev = makedev(13, 1023);
+    st->st_nlink = 1;
+}
+
+EXPORT int __xstat(int ver, const char *path, struct stat *st)
+{
+    static int (*real)(int, const char *, struct stat *);
+    if (is_pad_path(path)) {
+        fill_pad_stat(st);
+        return 0;
+    }
+    if (!real)
+        real = lookup(NULL, "__xstat");
+    return real ? real(ver, path, st) : -1;
+}
+
+EXPORT int __xstat64(int ver, const char *path, struct stat *st)
+{
+    static int (*real)(int, const char *, struct stat *);
+    if (is_pad_path(path)) {
+        fill_pad_stat(st);
+        return 0;
+    }
+    if (!real)
+        real = lookup(NULL, "__xstat64");
+    return real ? real(ver, path, st) : -1;
+}
+
+EXPORT int stat(const char *path, struct stat *st)
+{
+    static int (*real)(const char *, struct stat *);
+    if (is_pad_path(path)) {
+        fill_pad_stat(st);
+        return 0;
+    }
+    if (!real)
+        real = lookup(NULL, "stat");
+    return real ? real(path, st) : -1;
+}
+
+static int open_pad(int flags)
+{
+    static int (*real)(const char *, int, ...);
+    if (!real)
+        real = lookup(NULL, "open");
+    int fd = real ? real("/dev/null", (flags & ~(O_CREAT | O_TRUNC)) | O_CLOEXEC) : -1;
+    if (fd < 0)
+        return fd;
+    for (size_t i = 0; i < sizeof(pad_fds) / sizeof(pad_fds[0]); i++)
+        if (!pad_fds[i].fd) {
+            memset(&pad_fds[i], 0, sizeof(pad_fds[i]));
+            pad_fds[i].fd = fd + 1;
+            for (size_t a = 0; a < sizeof(pad_abs) / sizeof(pad_abs[0]); a++)
+                pad_fds[i].abs[pad_abs[a]] = pad_abs_value(pad_abs[a]);
+            pad_fds[i].buttons = shared->buttons;
+            return fd;
+        }
+    return fd;
+}
+
+EXPORT int open(const char *path, int flags, ...)
+{
+    static int (*real)(const char *, int, ...);
+    va_list ap;
+    va_start(ap, flags);
+    int mode = (flags & O_CREAT) ? va_arg(ap, int) : 0;
+    va_end(ap);
+    if (is_pad_path(path))
+        return open_pad(flags);
+    if (!real)
+        real = lookup(NULL, "open");
+    return real ? real(path, flags, mode) : -1;
+}
+
+EXPORT int open64(const char *path, int flags, ...)
+{
+    static int (*real)(const char *, int, ...);
+    va_list ap;
+    va_start(ap, flags);
+    int mode = (flags & O_CREAT) ? va_arg(ap, int) : 0;
+    va_end(ap);
+    if (is_pad_path(path))
+        return open_pad(flags);
+    if (!real)
+        real = lookup(NULL, "open64");
+    return real ? real(path, flags, mode) : -1;
+}
+
+EXPORT int close(int fd)
+{
+    static int (*real)(int);
+    pad_fd *p = pad_of(fd);
+    if (p)
+        p->fd = 0;
+    if (!real)
+        real = lookup(NULL, "close");
+    return real ? real(fd) : -1;
+}
+
+static void set_bit(unsigned char *bits, size_t len, unsigned bit)
+{
+    if (bit / 8 < len)
+        bits[bit / 8] |= (unsigned char)(1u << (bit % 8));
+}
+
+static int pad_ioctl(unsigned long req, void *arg)
+{
+    const unsigned nr = _IOC_NR(req), size = _IOC_SIZE(req);
+    if (_IOC_TYPE(req) != 'E')
+        goto unsupported;
+    if (req == EVIOCGVERSION) {
+        *(int *)arg = EV_VERSION;
+        return 0;
+    }
+    if (req == EVIOCGID) {
+        struct input_id *id = arg;
+        id->bustype = BUS_USB;
+        id->vendor = 0x045e;
+        id->product = 0x028e;
+        id->version = 0x0114;
+        return 0;
+    }
+    if (nr == _IOC_NR(EVIOCGNAME(0))) {
+        const char *name = "Microsoft X-Box 360 pad";
+        size_t n = strlen(name) + 1 < size ? strlen(name) + 1 : size;
+        memcpy(arg, name, n);
+        return (int)n;
+    }
+    if (nr == _IOC_NR(EVIOCGPHYS(0)) || nr == _IOC_NR(EVIOCGUNIQ(0))) {
+        if (size)
+            *(char *)arg = '\0';
+        return 0;
+    }
+    if (nr == _IOC_NR(EVIOCGPROP(0)) || nr == _IOC_NR(EVIOCGLED(0)) || nr == _IOC_NR(EVIOCGSND(0)) ||
+        nr == _IOC_NR(EVIOCGSW(0))) {
+        memset(arg, 0, size);
+        return (int)size;
+    }
+    if (nr == _IOC_NR(EVIOCGKEY(0))) {
+        memset(arg, 0, size);
+        for (unsigned b = 0; b < ATARIVCS_BTN_COUNT; b++)
+            if (shared && (shared->buttons >> b) & 1)
+                set_bit(arg, size, pad_keys[b]);
+        return (int)size;
+    }
+    if (nr >= 0x20 && nr < 0x40) { /* EVIOCGBIT(ev, len) */
+        const unsigned ev = nr - 0x20;
+        memset(arg, 0, size);
+        if (ev == 0) {
+            set_bit(arg, size, EV_SYN);
+            set_bit(arg, size, EV_KEY);
+            set_bit(arg, size, EV_ABS);
+        } else if (ev == EV_KEY) {
+            for (unsigned b = 0; b < ATARIVCS_BTN_COUNT; b++)
+                set_bit(arg, size, pad_keys[b]);
+        } else if (ev == EV_ABS) {
+            for (size_t a = 0; a < sizeof(pad_abs) / sizeof(pad_abs[0]); a++)
+                set_bit(arg, size, pad_abs[a]);
+        }
+        return (int)size;
+    }
+    if (nr >= 0x40 && nr < 0x40 + ABS_CNT && _IOC_DIR(req) == _IOC_READ) { /* EVIOCGABS(abs) */
+        const unsigned code = nr - 0x40;
+        struct input_absinfo *info = arg;
+        memset(info, 0, sizeof(*info));
+        info->value = pad_abs_value(code);
+        if (code == ABS_Z || code == ABS_RZ) {
+            info->maximum = 255;
+        } else if (code == ABS_HAT0X || code == ABS_HAT0Y) {
+            info->minimum = -1;
+            info->maximum = 1;
+        } else {
+            info->minimum = -32768;
+            info->maximum = 32767;
+            info->fuzz = 16;
+            info->flat = 128;
+        }
+        return 0;
+    }
+    if (req == EVIOCGRAB)
+        return 0;
+    if (req == EVIOCGEFFECTS) {
+        *(int *)arg = 0;
+        return 0;
+    }
+unsupported:
+    errno = ENOTTY;
+    return -1;
+}
+
+EXPORT int ioctl(int fd, unsigned long req, ...)
+{
+    static int (*real)(int, unsigned long, ...);
+    va_list ap;
+    va_start(ap, req);
+    void *arg = va_arg(ap, void *);
+    va_end(ap);
+    if (pad_of(fd))
+        return pad_ioctl(req, arg);
+    if (!real)
+        real = lookup(NULL, "ioctl");
+    return real ? real(fd, req, arg) : -1;
+}
+
+/* What changed since the last read, as input events with a SYN_REPORT */
+EXPORT ssize_t read(int fd, void *buf, size_t count)
+{
+    static ssize_t (*real)(int, void *, size_t);
+    pad_fd *p = pad_of(fd);
+    if (!p) {
+        if (!real)
+            real = lookup(NULL, "read");
+        return real ? real(fd, buf, count) : -1;
+    }
+    struct input_event ev[ATARIVCS_BTN_COUNT + 8 + 1];
+    size_t n = 0;
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    const uint32_t buttons = shared ? shared->buttons : 0;
+    for (unsigned b = 0; b < ATARIVCS_BTN_COUNT; b++)
+        if (((buttons ^ p->buttons) >> b) & 1) {
+            memset(&ev[n], 0, sizeof(ev[n]));
+            ev[n].type = EV_KEY;
+            ev[n].code = (uint16_t)pad_keys[b];
+            ev[n].value = (buttons >> b) & 1;
+            n++;
+        }
+    p->buttons = buttons;
+    for (size_t a = 0; a < sizeof(pad_abs) / sizeof(pad_abs[0]); a++) {
+        const int32_t v = pad_abs_value(pad_abs[a]);
+        if (v != p->abs[pad_abs[a]]) {
+            memset(&ev[n], 0, sizeof(ev[n]));
+            ev[n].type = EV_ABS;
+            ev[n].code = (uint16_t)pad_abs[a];
+            ev[n].value = v;
+            n++;
+            p->abs[pad_abs[a]] = v;
+        }
+    }
+    if (!n) {
+        errno = EAGAIN;
+        return -1;
+    }
+    memset(&ev[n], 0, sizeof(ev[n]));
+    ev[n].type = EV_SYN;
+    ev[n].code = SYN_REPORT;
+    n++;
+    for (size_t i = 0; i < n; i++) {
+        ev[i].input_event_sec = now.tv_sec;
+        ev[i].input_event_usec = now.tv_nsec / 1000;
+    }
+    size_t bytes = n * sizeof(ev[0]);
+    if (bytes > count)
+        bytes = count - count % sizeof(ev[0]); /* the rest comes with the next read */
+    memcpy(buf, ev, bytes);
+    return (ssize_t)bytes;
 }
 
 /* ---- dlsym: the functions above, also for games that look them up in the

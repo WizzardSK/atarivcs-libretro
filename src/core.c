@@ -495,6 +495,10 @@ bool retro_load_game(const struct retro_game_info *game)
         if (chdir(dir) != 0)
             _exit(127);
         setenv("ATARIVCS_SHM", shm_name, 1);
+        /* The pad for the SDL inside Unity games: the shim's device, and
+         * read while the game's window is not focused (it never is) */
+        setenv("SDL_JOYSTICK_DEVICE", "/dev/input/atarivcs-pad", 1);
+        setenv("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1", 1);
         if (have_audio) {
             setenv("ALSOFT_CONF", audio_conf, 1);
             setenv("ALSOFT_DRIVERS", "wave", 1);
