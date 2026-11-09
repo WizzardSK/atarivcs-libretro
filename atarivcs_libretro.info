@@ -4,7 +4,7 @@ authors = "WizzardSK"
 supported_extensions = "ini"
 corename = "Atari VCS"
 categories = "Game"
-license = "GPLv3"
+license = "MIT"
 permissions = ""
 display_version = "v0.1"
 

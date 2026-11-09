@@ -25,3 +25,7 @@ The RetroPad is the game's Xbox 360 layout: B = A, A = B, Y = X, X = Y, L/R = LB
 ## Building
 
 `make` builds the x86-64 shim and the core with the shim inside it. On a host other than x86-64 the shim needs an x86-64 cross compiler (`SHIM_CC`, by default `x86_64-linux-gnu-gcc`; Debian and Ubuntu: `gcc-x86-64-linux-gnu`). `.gitlab-ci.yml` is the libretro buildbot's recipe (Linux x86-64 and aarch64).
+
+## License
+
+MIT, see LICENSE. src/libretro.h is the libretro API header, MIT too (The RetroArch team).
