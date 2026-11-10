@@ -31,3 +31,15 @@ jobs:
             atarivcs_libretro.so
             atarivcs_shim_x86_64.so
             atarivcs_libretro.info
+      # FEX and its x86-64 libraries for RetroArch's system folder, as a
+      # tarball: an artifact's zip would drop the symlinks and exec bits
+      - if: matrix.arch == 'aarch64'
+        run: |
+          python3 scripts/fetch-fex.py system/atarivcs
+          tar -czf atarivcs-system-aarch64.tar.gz system
+          du -sh system/atarivcs/* atarivcs-system-aarch64.tar.gz
+      - if: matrix.arch == 'aarch64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: atarivcs-system-linux-aarch64
+          path: atarivcs-system-aarch64.tar.gz

@@ -1,6 +1,6 @@
 /* Atari VCS (2021) games in RetroArch. The game is a Linux x86-64 program;
- * the core starts it as a child process - directly on x86-64, through box64
- * elsewhere - with the shim preloaded, shows the frames the shim hands over
+ * the core starts it as a child process - directly on x86-64, through FEX or
+ * box64 elsewhere - with the shim preloaded, shows the frames the shim hands over
  * and gives the game RetroArch's pad. The game keeps its own time and sound:
  * no pause of its own, no savestates. */
 #define _GNU_SOURCE
@@ -16,6 +16,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/prctl.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -84,6 +85,16 @@ void retro_set_environment(retro_environment_t cb)
         log_cb = logging.log;
     bool no_game = false;
     cb(RETRO_ENVIRONMENT_SET_SUPPORT_NO_GAME, &no_game);
+#if !defined(__x86_64__)
+    /* What runs the x86-64 game here. FEX ran Breakout Recharged at 26-28
+     * fps in play where box64 managed 16-25 (Chromebook, Adreno 618), so
+     * Auto takes FEX whenever its files are in system/atarivcs */
+    static const struct retro_variable vars[] = {
+        { "atarivcs_runner", "x86-64 Emulator; Auto|FEX|box64" },
+        { NULL, NULL },
+    };
+    cb(RETRO_ENVIRONMENT_SET_VARIABLES, (void *)vars);
+#endif
 }
 void retro_set_video_refresh(retro_video_refresh_t cb) { video_cb = cb; }
 void retro_set_audio_sample(retro_audio_sample_t cb) { (void)cb; }
@@ -280,6 +291,24 @@ static bool find_box64(char *out, size_t size, char *libs, size_t libs_size)
         }
     }
     return false;
+}
+#endif
+
+#if !defined(__x86_64__)
+/* FEX and what it needs, in system/atarivcs (scripts/fetch-fex.py): fex/
+ * with FEX, FEXServer and the GL thunks, and fex-rootfs, the x86-64
+ * libraries the games expect of a desktop (glibc, SDL2, OpenAL, X11, the
+ * GL dispatcher) */
+static bool find_fex(char *root, size_t size)
+{
+    const char *system_dir = NULL;
+    if (!environ_cb(RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY, &system_dir) || !system_dir)
+        return false;
+    snprintf(root, size, "%s/atarivcs", system_dir);
+    char fex[PATH_MAX + 32], rootfs[PATH_MAX + 32];
+    snprintf(fex, sizeof(fex), "%s/fex/FEX", root);
+    snprintf(rootfs, sizeof(rootfs), "%s/fex-rootfs", root);
+    return access(fex, X_OK) == 0 && is_dir(rootfs);
 }
 #endif
 
@@ -539,11 +568,23 @@ bool retro_load_game(const struct retro_game_info *game)
     }
 
 #if !defined(__x86_64__)
-    char box64[PATH_MAX], libs[PATH_MAX];
-    if (!find_box64(box64, sizeof(box64), libs, sizeof(libs))) {
-        LOG_E("atarivcs: box64 not found (set ATARIVCS_BOX64, or let gameflix set it up)\n");
+    char box64[PATH_MAX] = "", libs[PATH_MAX] = "", fex_root[PATH_MAX] = "";
+    const char *runner = "Auto";
+    struct retro_variable var = { "atarivcs_runner", NULL };
+    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+        runner = var.value;
+    bool use_fex = strcmp(runner, "box64") != 0 && find_fex(fex_root, sizeof(fex_root));
+    if (!use_fex && !strcmp(runner, "FEX")) {
+        LOG_E("atarivcs: x86-64 Emulator is FEX, and FEX is not in system/atarivcs (fex/FEX and fex-rootfs)\n");
+        struct retro_message msg = { "atarivcs: FEX is missing from system/atarivcs", 300 };
+        environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE, &msg);
         return false;
     }
+    if (!use_fex && !find_box64(box64, sizeof(box64), libs, sizeof(libs))) {
+        LOG_E("atarivcs: neither FEX (system/atarivcs) nor box64 found (set ATARIVCS_BOX64, or let gameflix set it up)\n");
+        return false;
+    }
+    LOG_I("atarivcs: the game runs through %s\n", use_fex ? "FEX" : "box64");
 #endif
 
     /* What each RetroPad input is to the game, for RetroArch's Controls
@@ -661,6 +702,46 @@ bool retro_load_game(const struct retro_game_info *game)
         else
             execl(program, program, (char *)NULL);
 #else
+        if (use_fex) {
+            char fex[PATH_MAX + 32], dir_fex[PATH_MAX + 32], rootfs[PATH_MAX + 32];
+            char path[PATH_MAX * 2], value[PATH_MAX + 64];
+            snprintf(dir_fex, sizeof(dir_fex), "%s/fex", fex_root);
+            snprintf(fex, sizeof(fex), "%s/FEX", dir_fex);
+            snprintf(rootfs, sizeof(rootfs), "%s/fex-rootfs", fex_root);
+            setenv("FEX_ROOTFS", rootfs, 1);
+            /* GL goes to the host's driver through FEX's thunks: the
+             * rootfs has only the GL dispatcher, no Mesa of its own */
+            snprintf(value, sizeof(value), "%s/HostThunks", dir_fex);
+            setenv("FEX_THUNKHOSTLIBS", value, 1);
+            snprintf(value, sizeof(value), "%s/GuestThunks", dir_fex);
+            setenv("FEX_THUNKGUESTLIBS", value, 1);
+            snprintf(value, sizeof(value), "%s/thunks.json", dir_fex);
+            setenv("FEX_THUNKCONFIG", value, 1);
+            /* FEX's config and data (ThunksDB.json) from there too, not
+             * from the user's ~/.fex-emu */
+            snprintf(value, sizeof(value), "%s/", dir_fex);
+            setenv("FEX_APP_CONFIG_LOCATION", value, 1);
+            setenv("FEX_APP_DATA_LOCATION", value, 1);
+            /* FEX starts its FEXServer from the PATH */
+            const char *old_path = getenv("PATH");
+            snprintf(path, sizeof(path), "%s:%s", dir_fex, old_path ? old_path : "/usr/bin:/bin");
+            setenv("PATH", path, 1);
+            /* FEX hands LD_PRELOAD to the game's loader; the host's (FEX is
+             * an aarch64 program) only warns that it cannot load the shim */
+            setenv("LD_PRELOAD", shim, 1);
+            /* No core dump of a game that crashes under FEX: its address
+             * space is huge, and writing it held the disk for minutes */
+            struct rlimit no_core = { 0, 0 };
+            setrlimit(RLIMIT_CORE, &no_core);
+            if (script) {
+                char sh[PATH_MAX + 32];
+                snprintf(sh, sizeof(sh), "%s/bin/sh", rootfs);
+                execl(fex, fex, sh, program, (char *)NULL);
+            } else {
+                execl(fex, fex, program, (char *)NULL);
+            }
+            _exit(127);
+        }
         setenv("BOX64_LD_PRELOAD", shim, 1);
         setenv("BOX64_NOBANNER", "1", 1);
         if (libs[0])
