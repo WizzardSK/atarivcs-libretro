@@ -25,6 +25,7 @@
 #include "libretro.h"
 #include "shared.h"
 #include "daemon.h"
+#include "gpu.h"
 #if defined(ATARIVCS_EMBEDDED_FEX)
 #include "miniz/miniz.h"
 extern const unsigned char atarivcs_fex_zip[];
@@ -442,6 +443,7 @@ static bool create_shared(void)
     shared->version = ATARIVCS_VERSION;
     shared->axes[ATARIVCS_AXIS_LT] = -32768;
     shared->axes[ATARIVCS_AXIS_RT] = -32768;
+    shared->gpu_middle = 1; /* the shim draws into 0 first, the core holds 2 */
     return true;
 }
 
@@ -762,6 +764,11 @@ bool retro_load_game(const struct retro_game_info *game)
             sw <= ATARIVCS_MAX_WIDTH && sh <= ATARIVCS_MAX_HEIGHT)
             snprintf(screen, sizeof(screen), "%ux%u", sw, sh);
         LOG_I("atarivcs: the game is told its screen is %s\n", screen);
+        /* Zero-copy (gpu.h): GPU buffers that large, if RetroArch takes an
+         * OpenGL context for the core */
+        if (sscanf(screen, "%ux%u", &sw, &sh) == 2 && gpu_alloc(sw, sh, log_cb) &&
+            !gpu_request_hw(environ_cb))
+            gpu_free();
     }
 
     child = fork();
@@ -782,6 +789,12 @@ bool retro_load_game(const struct retro_game_info *game)
         if (chdir(dir) != 0)
             _exit(127);
         setenv("ATARIVCS_SHM", shm_name, 1);
+        if (gpu_env()) {
+            gpu_child_keep_fds();
+            setenv("ATARIVCS_DMABUF", gpu_env(), 1);
+        } else {
+            unsetenv("ATARIVCS_DMABUF");
+        }
         if (atarivcs_daemon_runtime_dir())
             setenv("XDG_RUNTIME_DIR", atarivcs_daemon_runtime_dir(), 1);
         /* The pad for the SDL inside Unity games: the shim's device, and
@@ -887,6 +900,7 @@ void retro_unload_game(void)
     close_audio();
     atarivcs_daemon_stop();
     remove_written_shim();
+    gpu_free();
     free(frame);
     frame = NULL;
     have_frame = false;
@@ -994,6 +1008,24 @@ static void write_pad(void)
 }
 
 /* The newest whole frame the shim wrote, flipped top down */
+/* RetroArch told the picture's size when it changes */
+static void set_size(unsigned w, unsigned h)
+{
+    if (w == cur_w && h == cur_h)
+        return;
+    cur_w = w;
+    cur_h = h;
+    struct retro_system_av_info av;
+    retro_get_system_av_info(&av);
+    if (w > av.geometry.max_width || h > av.geometry.max_height) {
+        av.geometry.max_width = w > 1920 ? w : 1920;
+        av.geometry.max_height = h > 1080 ? h : 1080;
+        environ_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &av);
+    } else {
+        environ_cb(RETRO_ENVIRONMENT_SET_GEOMETRY, &av.geometry);
+    }
+}
+
 static bool take_frame(void)
 {
     uint32_t seq = __atomic_load_n(&shared->frame_seq, __ATOMIC_ACQUIRE);
@@ -1009,19 +1041,7 @@ static bool take_frame(void)
         return false; /* written meanwhile: the next run takes it */
     last_seq = seq;
 
-    if (w != cur_w || h != cur_h) {
-        cur_w = w;
-        cur_h = h;
-        struct retro_system_av_info av;
-        retro_get_system_av_info(&av);
-        if (w > av.geometry.max_width || h > av.geometry.max_height) {
-            av.geometry.max_width = w > 1920 ? w : 1920;
-            av.geometry.max_height = h > 1080 ? h : 1080;
-            environ_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &av);
-        } else {
-            environ_cb(RETRO_ENVIRONMENT_SET_GEOMETRY, &av.geometry);
-        }
-    }
+    set_size(w, h);
     have_frame = true;
     return true;
 }
@@ -1030,7 +1050,16 @@ static bool take_frame(void)
  * frame shown goes to /tmp/atarivcs-frame.ppm and the request is removed */
 static void dump_frame_if_asked(void)
 {
-    if (!have_frame || access("/tmp/atarivcs-dump", F_OK) != 0)
+    if (access("/tmp/atarivcs-dump", F_OK) != 0)
+        return;
+    /* zero-copy: the picture shown, read from the GPU */
+    unsigned gw, gh;
+    if (gpu_active() && gpu_read_shown(frame, ATARIVCS_MAX_WIDTH * ATARIVCS_MAX_HEIGHT, &gw, &gh)) {
+        cur_w = gw;
+        cur_h = gh;
+        have_frame = true;
+    }
+    if (!have_frame)
         return;
     unlink("/tmp/atarivcs-dump");
     FILE *f = fopen("/tmp/atarivcs-frame.ppm", "wb");
@@ -1116,7 +1145,12 @@ void retro_run(void)
         }
     }
 
-    if (shared && take_frame())
+    if (gpu_active()) {
+        const bool cpu_new = shared && take_frame();
+        unsigned w = cur_w, h = cur_h;
+        gpu_run(shared, cpu_new ? frame : NULL, cur_w, cur_h, video_cb, &w, &h);
+        set_size(w, h);
+    } else if (shared && take_frame())
         video_cb(frame, cur_w, cur_h, (size_t)cur_w * 4);
     else if (have_frame)
         video_cb(NULL, cur_w, cur_h, (size_t)cur_w * 4);

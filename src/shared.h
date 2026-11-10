@@ -7,10 +7,11 @@
 #include <stdint.h>
 
 #define ATARIVCS_MAGIC 0x53435641u /* "AVCS" */
-#define ATARIVCS_VERSION 3u
+#define ATARIVCS_VERSION 4u
 
 #define ATARIVCS_MAX_WIDTH 3840
 #define ATARIVCS_MAX_HEIGHT 2160
+#define ATARIVCS_GPU_NEW 4u
 
 /* The pad as an Xbox 360 controller reads through SDL's joystick API on
  * Linux (xpad): the layout the games made for the VCS also take */
@@ -57,6 +58,20 @@ typedef struct atarivcs_shared {
     volatile uint32_t width;
     volatile uint32_t height;
     uint32_t pad1;
+
+    /* Zero-copy frames (gpu.c, shim.c): three GPU buffers the core made
+     * (dmabuf, passed in ATARIVCS_DMABUF) and the shim copies the game's
+     * picture into, on the GPU. A triple buffer: the shim draws into its
+     * own, the core shows its own, and the third is exchanged through
+     * gpu_middle - bits 0-1 its index, ATARIVCS_GPU_NEW set when the shim
+     * put a new frame there. gpu_w/gpu_h: the picture's size in each, rows
+     * bottom up from the buffer's start. */
+    volatile uint32_t gpu_middle;
+    volatile uint32_t gpu_w[3], gpu_h[3];
+    volatile uint32_t gpu_frames; /* handed over this way so far */
+    /* Set by the core while it can show the GPU buffers (imported into
+     * RetroArch's OpenGL); without it the shim reads frames back */
+    volatile uint32_t gpu_ready;
     uint8_t pixels[ATARIVCS_MAX_WIDTH * ATARIVCS_MAX_HEIGHT * 4];
 } atarivcs_shared;
 

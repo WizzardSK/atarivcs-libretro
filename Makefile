@@ -15,7 +15,7 @@ endif
 # FEX_ZIP=<zip>: FEX and its x86-64 libraries (scripts/fetch-fex.py, zipped
 # with a build stamp in fex/build) carried in the core, which writes them to
 # system/atarivcs; the aarch64 CI build does this
-CORE_SOURCES = src/core.c src/daemon.c src/shim_blob.S
+CORE_SOURCES = src/core.c src/daemon.c src/gpu.c src/shim_blob.S
 ifneq ($(FEX_ZIP),)
 CORE_SOURCES += src/miniz/miniz.c src/fex_embed.S
 CFLAGS += -DATARIVCS_EMBEDDED_FEX -DATARIVCS_FEX_ZIP='"$(abspath $(FEX_ZIP))"' -DMINIZ_NO_ZLIB_COMPATIBLE_NAMES
@@ -23,7 +23,7 @@ endif
 
 all: atarivcs_libretro.so
 
-atarivcs_libretro.so: src/core.c src/daemon.c src/daemon.h src/shared.h src/libretro.h src/shim_blob.S atarivcs_shim_x86_64.so $(FEX_ZIP)
+atarivcs_libretro.so: src/core.c src/daemon.c src/daemon.h src/gpu.c src/gpu.h src/shared.h src/libretro.h src/shim_blob.S atarivcs_shim_x86_64.so $(FEX_ZIP)
 	$(CC) $(CFLAGS) -fvisibility=default -DGIT_VERSION=\"$(GIT_VERSION)\" -shared -o $@ $(CORE_SOURCES) -pthread -ldl -lrt -Wl,--version-script=src/link.T
 
 atarivcs_shim_x86_64.so: src/shim.c src/shim_udev.c src/shim_pad.h src/shared.h

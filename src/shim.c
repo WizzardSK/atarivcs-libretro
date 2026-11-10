@@ -108,13 +108,6 @@ typedef int GLsizei;
 #define GL_SYNC_FLUSH_COMMANDS_BIT 0x00000001
 #define GL_TIMEOUT_EXPIRED 0x911B
 #define GL_WAIT_FAILED 0x911D
-#define GL_MAP_PERSISTENT_BIT 0x0040
-#define GL_MAP_COHERENT_BIT 0x0080
-#define GL_CLIENT_STORAGE_BIT 0x0200
-#define GL_SYNC_GPU_COMMANDS_COMPLETE 0x9117
-#define GL_SYNC_FLUSH_COMMANDS_BIT 0x00000001
-#define GL_TIMEOUT_EXPIRED 0x911B
-#define GL_WAIT_FAILED 0x911D
 #define GL_MAP_READ_BIT 0x0001
 
 /* The frame handed over: rows bottom up as glReadPixels gives them, under
@@ -127,6 +120,180 @@ static void publish(const void *pixels, unsigned int w, unsigned int h)
     shared->width = w;
     shared->height = h;
     __atomic_add_fetch(&shared->frame_seq, 1, __ATOMIC_ACQ_REL); /* even: done */
+}
+
+/* ---- Zero-copy (gpu.h): the picture copied on the GPU into one of the
+ * core's three buffers (dmabuf, ATARIVCS_DMABUF "W:H:SIZE:fd0,fd1,fd2"),
+ * imported into the game's context (GL_EXT_memory_object_fd). Handed over
+ * a swap late, once its fence has passed, through the triple buffer in
+ * shared.h. False when it cannot be used: the frame is read back. ---- */
+
+#define GL_DRAW_FRAMEBUFFER 0x8CA9
+#define GL_DRAW_FRAMEBUFFER_BINDING 0x8CA6
+#define GL_COLOR_ATTACHMENT0 0x8CE0
+#define GL_FRAMEBUFFER_COMPLETE 0x8CD5
+#define GL_COLOR_BUFFER_BIT 0x00004000
+#define GL_NEAREST 0x2600
+#define GL_SCISSOR_TEST 0x0C11
+#define GL_FRAMEBUFFER_SRGB 0x8DB9
+#define GL_TEXTURE_2D 0x0DE1
+#define GL_TEXTURE_BINDING_2D 0x8069
+#define GL_RGBA8 0x8058
+#define GL_TEXTURE_TILING_EXT 0x9580
+#define GL_LINEAR_TILING_EXT 0x9585
+#define GL_HANDLE_TYPE_OPAQUE_FD_EXT 0x9586
+#define ZC_GL_SYNC_GPU_COMMANDS_COMPLETE 0x9117
+#define ZC_GL_SYNC_FLUSH_COMMANDS_BIT 0x00000001
+
+static int zero_copy(unsigned int w, unsigned int h)
+{
+    static int parsed, usable;
+    static unsigned int bw, bh;
+    static uint64_t bsize;
+    static int bfd[3];
+    static struct {
+        void (*CreateMemoryObjectsEXT)(GLsizei, unsigned int *);
+        void (*ImportMemoryFdEXT)(unsigned int, uint64_t, GLenum, GLint);
+        void (*TexStorageMem2DEXT)(GLenum, GLsizei, GLenum, GLsizei, GLsizei, unsigned int, uint64_t);
+        void (*GenTextures)(GLsizei, unsigned int *);
+        void (*BindTexture)(GLenum, unsigned int);
+        void (*TexParameteri)(GLenum, GLenum, GLint);
+        void (*GenFramebuffers)(GLsizei, unsigned int *);
+        void (*BindFramebuffer)(GLenum, unsigned int);
+        void (*FramebufferTexture2D)(GLenum, GLenum, GLenum, unsigned int, GLint);
+        GLenum (*CheckFramebufferStatus)(GLenum);
+        void (*BlitFramebuffer)(GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, unsigned int, GLenum);
+        unsigned char (*IsEnabled)(GLenum);
+        void (*Enable)(GLenum);
+        void (*Disable)(GLenum);
+        void (*GetIntegerv)(GLenum, GLint *);
+        void (*ReadBuffer)(GLenum);
+        void *(*FenceSync)(GLenum, unsigned int);
+        GLenum (*ClientWaitSync)(void *, unsigned int, uint64_t);
+        void (*DeleteSync)(void *);
+        GLenum (*GetError)(void);
+        void *(*GetCurrentContext)(void);
+    } f;
+    static void *ctx;
+    static unsigned int tex[3], fbo[3];
+    static int back = 0, pending = -1;
+    static unsigned int pending_w, pending_h;
+    static void *fence;
+
+    if (!parsed) {
+        parsed = 1;
+        const char *v = getenv("ATARIVCS_DMABUF");
+        unsigned long long size = 0;
+        usable = v && sscanf(v, "%u:%u:%llu:%d,%d,%d", &bw, &bh, &size, &bfd[0], &bfd[1], &bfd[2]) == 6;
+        bsize = size;
+        if (usable) {
+            void *(*proc)(const unsigned char *) = lookup(gl_lib, "glXGetProcAddress");
+#define ZC(name) (*(void **)&f.name = proc ? proc((const unsigned char *)"gl" #name) : NULL)
+            ZC(CreateMemoryObjectsEXT); ZC(ImportMemoryFdEXT); ZC(TexStorageMem2DEXT);
+            ZC(GenFramebuffers); ZC(BindFramebuffer); ZC(FramebufferTexture2D);
+            ZC(CheckFramebufferStatus); ZC(BlitFramebuffer); ZC(FenceSync);
+            ZC(ClientWaitSync); ZC(DeleteSync);
+#undef ZC
+            *(void **)&f.GenTextures = lookup(gl_lib, "glGenTextures");
+            *(void **)&f.BindTexture = lookup(gl_lib, "glBindTexture");
+            *(void **)&f.TexParameteri = lookup(gl_lib, "glTexParameteri");
+            *(void **)&f.IsEnabled = lookup(gl_lib, "glIsEnabled");
+            *(void **)&f.Enable = lookup(gl_lib, "glEnable");
+            *(void **)&f.Disable = lookup(gl_lib, "glDisable");
+            *(void **)&f.GetIntegerv = lookup(gl_lib, "glGetIntegerv");
+            *(void **)&f.ReadBuffer = lookup(gl_lib, "glReadBuffer");
+            *(void **)&f.GetError = lookup(gl_lib, "glGetError");
+            *(void **)&f.GetCurrentContext = lookup(gl_lib, "glXGetCurrentContext");
+            void **all = (void **)&f;
+            for (size_t i = 0; i < sizeof(f) / sizeof(void *); i++)
+                if (!all[i])
+                    usable = 0;
+        }
+        fprintf(stderr, "atarivcs shim: zero-copy %s\n",
+                usable ? "possible" : v ? "impossible (no GL_EXT_memory_object_fd)" : "not offered");
+    }
+    if (!usable || !__atomic_load_n(&shared->gpu_ready, __ATOMIC_ACQUIRE) || w > bw || h > bh)
+        return 0;
+
+    /* The buffers in this context: imported again for a new one */
+    void *now = f.GetCurrentContext();
+    if (now != ctx) {
+        ctx = now;
+        pending = -1;
+        fence = NULL;
+        GLint old_tex = 0, old_draw = 0;
+        f.GetIntegerv(GL_TEXTURE_BINDING_2D, &old_tex);
+        f.GetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &old_draw);
+        while (f.GetError())
+            ;
+        unsigned int mem[3];
+        f.CreateMemoryObjectsEXT(3, mem);
+        f.GenTextures(3, tex);
+        f.GenFramebuffers(3, fbo);
+        int ok = 1;
+        for (int i = 0; i < 3 && ok; i++) {
+            f.ImportMemoryFdEXT(mem[i], bsize, GL_HANDLE_TYPE_OPAQUE_FD_EXT, dup(bfd[i]));
+            f.BindTexture(GL_TEXTURE_2D, tex[i]);
+            f.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_TILING_EXT, GL_LINEAR_TILING_EXT);
+            f.TexStorageMem2DEXT(GL_TEXTURE_2D, 1, GL_RGBA8, (GLsizei)bw, (GLsizei)bh, mem[i], 0);
+            f.BindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo[i]);
+            f.FramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex[i], 0);
+            ok = f.CheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+        }
+        GLenum err = f.GetError();
+        f.BindTexture(GL_TEXTURE_2D, (unsigned int)old_tex);
+        f.BindFramebuffer(GL_DRAW_FRAMEBUFFER, (unsigned int)old_draw);
+        fprintf(stderr, "atarivcs shim: the core's %ux%u buffers in the game's context: %s (error 0x%x)\n",
+                bw, bh, ok && !err ? "yes, zero-copy" : "no, frames are read back", err);
+        if (!ok || err) {
+            usable = 0;
+            return 0;
+        }
+    }
+
+    GLint draw_fb = 0, read_fb = 0, read_buf = 0;
+    f.GetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &draw_fb);
+    f.GetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read_fb);
+    f.GetIntegerv(GL_READ_BUFFER, &read_buf);
+    const unsigned char scissor = f.IsEnabled(GL_SCISSOR_TEST), srgb = f.IsEnabled(GL_FRAMEBUFFER_SRGB);
+
+    /* The last swap's frame, done on the GPU by now, handed over */
+    if (pending >= 0) {
+        if (fence) {
+            f.ClientWaitSync(fence, ZC_GL_SYNC_FLUSH_COMMANDS_BIT, 50000000ull);
+            f.DeleteSync(fence);
+            fence = NULL;
+        }
+        shared->gpu_w[pending] = pending_w;
+        shared->gpu_h[pending] = pending_h;
+        uint32_t old = __atomic_exchange_n(&shared->gpu_middle, (uint32_t)pending | ATARIVCS_GPU_NEW, __ATOMIC_ACQ_REL);
+        back = (int)(old & 3u);
+        shared->gpu_frames++;
+        pending = -1;
+    }
+
+    /* This one, copied into the shim's buffer */
+    f.BindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    f.ReadBuffer(GL_BACK);
+    f.BindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo[back]);
+    if (scissor)
+        f.Disable(GL_SCISSOR_TEST);
+    if (srgb)
+        f.Disable(GL_FRAMEBUFFER_SRGB);
+    f.BlitFramebuffer(0, 0, (GLint)w, (GLint)h, 0, 0, (GLint)w, (GLint)h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    fence = f.FenceSync(ZC_GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    pending = back;
+    pending_w = w;
+    pending_h = h;
+
+    if (scissor)
+        f.Enable(GL_SCISSOR_TEST);
+    if (srgb)
+        f.Enable(GL_FRAMEBUFFER_SRGB);
+    f.ReadBuffer((GLenum)read_buf);
+    f.BindFramebuffer(GL_READ_FRAMEBUFFER, (unsigned int)read_fb);
+    f.BindFramebuffer(GL_DRAW_FRAMEBUFFER, (unsigned int)draw_fb);
+    return 1;
 }
 
 static void capture(void *dpy, unsigned long drawable)
@@ -201,6 +368,22 @@ static void capture(void *dpy, unsigned long drawable)
     struct timespec t0, t1, t2;
     clock_gettime(CLOCK_MONOTONIC, &t0);
     t2 = t0;
+    if (zero_copy(w, h)) {
+        /* Every two seconds or so: the rate, and what the copy costs here */
+        static unsigned zswaps;
+        static double zms, zlast;
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        zms += (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6;
+        if (++zswaps % 120 == 1) {
+            const double t = t1.tv_sec + t1.tv_nsec / 1e9;
+            fprintf(stderr, "atarivcs shim: swap %u, %ux%u, %.1f fps, zero-copy %.2f ms a frame, %u frames handed over\n",
+                    zswaps, w, h, zlast ? 120.0 / (t - zlast) : 0.0, zswaps > 1 ? zms / 120.0 : zms,
+                    (unsigned)shared->gpu_frames);
+            zlast = t;
+            zms = 0;
+        }
+        return;
+    }
 
     /* What the game had set, put back after */
     GLint read_buf = 0, align = 4, row = 0, skip_rows = 0, skip_pixels = 0, pbo = 0, read_fbo = 0;
