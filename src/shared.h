@@ -56,7 +56,9 @@ typedef struct atarivcs_shared {
     volatile uint32_t frame_seq;
     volatile uint32_t width;
     volatile uint32_t height;
-    uint32_t pad1;
+    /* 1: the pixels are in memory order R, G, B, X instead (read as
+     * GL_RGBA, ATARIVCS_READ_RGBA=1), the core swaps them */
+    volatile uint32_t rgba;
     uint8_t pixels[ATARIVCS_MAX_WIDTH * ATARIVCS_MAX_HEIGHT * 4];
 } atarivcs_shared;
 

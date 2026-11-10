@@ -888,6 +888,13 @@ static bool take_frame(void)
     const uint8_t *src = shared->pixels;
     for (unsigned y = 0; y < h; y++)
         memcpy(&frame[(size_t)y * w], src + (size_t)(h - 1 - y) * w * 4, (size_t)w * 4);
+    if (shared->rgba) {
+        /* R, G, B, X in memory: red and blue swapped into XRGB8888 */
+        for (size_t i = 0; i < (size_t)w * h; i++) {
+            const uint32_t p = frame[i];
+            frame[i] = (p & 0xFF00FF00u) | ((p >> 16) & 0xFFu) | ((p & 0xFFu) << 16);
+        }
+    }
     if (__atomic_load_n(&shared->frame_seq, __ATOMIC_ACQUIRE) != seq)
         return false; /* written meanwhile: the next run takes it */
     last_seq = seq;
