@@ -100,14 +100,25 @@ typedef int GLsizei;
 #define GLX_WIDTH 0x801D
 #define GLX_HEIGHT 0x801E
 
-#define GL_RGBA 0x1908
 #define GL_STREAM_READ 0x88E1
+#define GL_MAP_PERSISTENT_BIT 0x0040
+#define GL_MAP_COHERENT_BIT 0x0080
+#define GL_CLIENT_STORAGE_BIT 0x0200
+#define GL_SYNC_GPU_COMMANDS_COMPLETE 0x9117
+#define GL_SYNC_FLUSH_COMMANDS_BIT 0x00000001
+#define GL_TIMEOUT_EXPIRED 0x911B
+#define GL_WAIT_FAILED 0x911D
+#define GL_MAP_PERSISTENT_BIT 0x0040
+#define GL_MAP_COHERENT_BIT 0x0080
+#define GL_CLIENT_STORAGE_BIT 0x0200
+#define GL_SYNC_GPU_COMMANDS_COMPLETE 0x9117
+#define GL_SYNC_FLUSH_COMMANDS_BIT 0x00000001
+#define GL_TIMEOUT_EXPIRED 0x911B
+#define GL_WAIT_FAILED 0x911D
 #define GL_MAP_READ_BIT 0x0001
 
 /* The frame handed over: rows bottom up as glReadPixels gives them, under
  * the frame_seq protocol (shared.h) */
-static int read_rgba;
-
 static void publish(const void *pixels, unsigned int w, unsigned int h)
 {
     __atomic_add_fetch(&shared->frame_seq, 1, __ATOMIC_ACQ_REL); /* odd: writing */
@@ -115,7 +126,6 @@ static void publish(const void *pixels, unsigned int w, unsigned int h)
         memcpy(shared->pixels, pixels, (size_t)w * h * 4);
     shared->width = w;
     shared->height = h;
-    shared->rgba = (uint32_t)read_rgba;
     __atomic_add_fetch(&shared->frame_seq, 1, __ATOMIC_ACQ_REL); /* even: done */
 }
 
@@ -133,7 +143,11 @@ static void capture(void *dpy, unsigned long drawable)
     static void *(*map_range)(GLenum, intptr_t, intptr_t, unsigned int);
     static unsigned char (*unmap)(GLenum);
     static void *(*current_context)(void);
-    static int resolved, sync_read;
+    static void (*buffer_storage)(GLenum, intptr_t, const void *, unsigned int);
+    static void *(*fence_sync)(GLenum, unsigned int);
+    static GLenum (*client_wait_sync)(void *, unsigned int, uint64_t);
+    static void (*delete_sync)(void *);
+    static int resolved, sync_read, storage;
 
     if (!shared)
         return;
@@ -153,19 +167,27 @@ static void capture(void *dpy, unsigned long drawable)
             buffer_data = proc((const unsigned char *)"glBufferData");
             map_range = proc((const unsigned char *)"glMapBufferRange");
             unmap = proc((const unsigned char *)"glUnmapBuffer");
+            buffer_storage = proc((const unsigned char *)"glBufferStorage");
+            fence_sync = proc((const unsigned char *)"glFenceSync");
+            client_wait_sync = proc((const unsigned char *)"glClientWaitSync");
+            delete_sync = proc((const unsigned char *)"glDeleteSync");
         }
         /* ATARIVCS_SYNC_READ=1: each frame read and waited for at its own
          * swap, as before the pixel buffers (comparison runs) */
         const char *v = getenv("ATARIVCS_SYNC_READ");
         sync_read = (v && *v == '1') || !bind_buffer || !gen_buffers || !buffer_data ||
                     !map_range || !unmap || !current_context;
-        /* ATARIVCS_READ_RGBA=1: read in the GPU's own channel order, which
-         * a driver may copy without converting each pixel (comparison) */
-        v = getenv("ATARIVCS_READ_RGBA");
-        read_rgba = v && *v == '1';
-        fprintf(stderr, "atarivcs shim: frames read %s, as %s\n",
-                sync_read ? "at their swap (synchronous)" : "through two pixel buffers, a frame late",
-                read_rgba ? "RGBA" : "BGRA");
+        /* Pixel buffers in the CPU's cached memory (glBufferStorage with
+         * GL_CLIENT_STORAGE_BIT, mapped once, a fence per read): copying out
+         * of a plain one, uncached, took 20 ms a 720p frame on the
+         * Chromebook. ATARIVCS_PLAIN_PBO=1: the plain ones (comparison) */
+        v = getenv("ATARIVCS_PLAIN_PBO");
+        storage = !sync_read && !(v && *v == '1') && buffer_storage && fence_sync &&
+                  client_wait_sync && delete_sync;
+        fprintf(stderr, "atarivcs shim: frames read %s\n",
+                sync_read ? "at their swap (synchronous)"
+                : storage ? "through two cached pixel buffers, a frame late"
+                          : "through two pixel buffers, a frame late");
     }
     if (!query || !get_integerv || !read_buffer || !pixel_storei || !read_pixels)
         return;
@@ -179,7 +201,6 @@ static void capture(void *dpy, unsigned long drawable)
     struct timespec t0, t1, t2;
     clock_gettime(CLOCK_MONOTONIC, &t0);
     t2 = t0;
-    const GLenum format = read_rgba ? GL_RGBA : GL_BGRA;
 
     /* What the game had set, put back after */
     GLint read_buf = 0, align = 4, row = 0, skip_rows = 0, skip_pixels = 0, pbo = 0, read_fbo = 0;
@@ -207,10 +228,9 @@ static void capture(void *dpy, unsigned long drawable)
         /* glReadPixels waits for the GPU to finish the frame, and the game
          * with it: on the Chromebook a costly stall at 720p */
         __atomic_add_fetch(&shared->frame_seq, 1, __ATOMIC_ACQ_REL);
-        read_pixels(0, 0, (GLsizei)w, (GLsizei)h, format, GL_UNSIGNED_BYTE, shared->pixels);
+        read_pixels(0, 0, (GLsizei)w, (GLsizei)h, GL_BGRA, GL_UNSIGNED_BYTE, shared->pixels);
         shared->width = w;
         shared->height = h;
-        shared->rgba = (uint32_t)read_rgba;
         __atomic_add_fetch(&shared->frame_seq, 1, __ATOMIC_ACQ_REL);
         clock_gettime(CLOCK_MONOTONIC, &t2);
     } else {
@@ -223,6 +243,7 @@ static void capture(void *dpy, unsigned long drawable)
         static unsigned int bufs[2];
         static unsigned int buf_w[2], buf_h[2];
         static int filled[2], next_buf;
+        static void *mapped[2], *fences[2];
         static void *ctx;
         void *now_ctx = current_context();
         if (now_ctx != ctx) {
@@ -230,18 +251,49 @@ static void capture(void *dpy, unsigned long drawable)
             gen_buffers(2, bufs);
             buf_w[0] = buf_w[1] = buf_h[0] = buf_h[1] = 0;
             filled[0] = filled[1] = 0;
+            mapped[0] = mapped[1] = fences[0] = fences[1] = NULL;
         }
         const int cur = next_buf, prev = next_buf ^ 1;
         bind_buffer(GL_PIXEL_PACK_BUFFER, bufs[cur]);
         if (buf_w[cur] != w || buf_h[cur] != h) {
-            buffer_data(GL_PIXEL_PACK_BUFFER, (intptr_t)w * h * 4, NULL, GL_STREAM_READ);
+            const intptr_t size = (intptr_t)w * h * 4;
+            if (storage) {
+                /* immutable storage: a new size takes a new buffer */
+                if (buf_w[cur]) {
+                    if (mapped[cur])
+                        unmap(GL_PIXEL_PACK_BUFFER);
+                    gen_buffers(1, &bufs[cur]);
+                    bind_buffer(GL_PIXEL_PACK_BUFFER, bufs[cur]);
+                }
+                buffer_storage(GL_PIXEL_PACK_BUFFER, size, NULL,
+                               GL_MAP_READ_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT |
+                               GL_CLIENT_STORAGE_BIT);
+                mapped[cur] = map_range(GL_PIXEL_PACK_BUFFER, 0, size,
+                                        GL_MAP_READ_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT);
+            } else {
+                buffer_data(GL_PIXEL_PACK_BUFFER, size, NULL, GL_STREAM_READ);
+            }
             buf_w[cur] = w;
             buf_h[cur] = h;
         }
-        read_pixels(0, 0, (GLsizei)w, (GLsizei)h, format, GL_UNSIGNED_BYTE, NULL);
+        read_pixels(0, 0, (GLsizei)w, (GLsizei)h, GL_BGRA, GL_UNSIGNED_BYTE, NULL);
+        if (storage) {
+            if (fences[cur])
+                delete_sync(fences[cur]);
+            fences[cur] = fence_sync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+        }
         filled[cur] = 1;
         clock_gettime(CLOCK_MONOTONIC, &t2);
-        if (filled[prev]) {
+        if (filled[prev] && storage && mapped[prev]) {
+            /* written by the GPU once its fence is signalled; at most 50 ms
+             * waited for that */
+            const GLenum r = fences[prev]
+                ? client_wait_sync(fences[prev], GL_SYNC_FLUSH_COMMANDS_BIT, 50000000ull)
+                : GL_WAIT_FAILED;
+            if (r != GL_TIMEOUT_EXPIRED && r != GL_WAIT_FAILED)
+                publish(mapped[prev], buf_w[prev], buf_h[prev]);
+            filled[prev] = 0;
+        } else if (filled[prev]) {
             bind_buffer(GL_PIXEL_PACK_BUFFER, bufs[prev]);
             const size_t size = (size_t)buf_w[prev] * buf_h[prev] * 4;
             const void *p = map_range(GL_PIXEL_PACK_BUFFER, 0, (intptr_t)size, GL_MAP_READ_BIT);
