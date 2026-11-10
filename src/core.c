@@ -25,6 +25,11 @@
 #include "libretro.h"
 #include "shared.h"
 #include "daemon.h"
+#if defined(ATARIVCS_EMBEDDED_FEX)
+#include "miniz/miniz.h"
+extern const unsigned char atarivcs_fex_zip[];
+extern const unsigned char atarivcs_fex_zip_end[];
+#endif
 
 #define SHIM_NAME "atarivcs_shim_x86_64.so"
 #define SAMPLE_RATE 48000
@@ -310,6 +315,97 @@ static bool find_fex(char *root, size_t size)
     snprintf(rootfs, sizeof(rootfs), "%s/fex-rootfs", root);
     return access(fex, X_OK) == 0 && is_dir(rootfs);
 }
+
+#if defined(ATARIVCS_EMBEDDED_FEX)
+static void make_dirs(char *path)
+{
+    for (char *p = path + 1; *p; p++) {
+        if (*p != '/')
+            continue;
+        *p = '\0';
+        mkdir(path, 0755);
+        *p = '/';
+    }
+}
+
+/* The FEX this core carries, written to system/atarivcs when what is there
+ * is from another build or missing, as fex/build says: one file to install,
+ * the core. As in the linuxloader core. */
+static bool install_fex(void)
+{
+    const char *system_dir = NULL;
+    if (!environ_cb(RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY, &system_dir) || !system_dir)
+        return false;
+    char root[PATH_MAX], stamp_path[PATH_MAX + 16], have[64] = "", want[64] = "";
+    snprintf(root, sizeof(root), "%s/atarivcs", system_dir);
+    snprintf(stamp_path, sizeof(stamp_path), "%s/fex/build", root);
+
+    mz_zip_archive zip;
+    memset(&zip, 0, sizeof(zip));
+    if (!mz_zip_reader_init_mem(&zip, atarivcs_fex_zip, (size_t)(atarivcs_fex_zip_end - atarivcs_fex_zip), 0)) {
+        LOG_E("atarivcs: the FEX the core carries cannot be read\n");
+        return false;
+    }
+    /* The stamp the zip carries, against the one written */
+    int stamp_index = mz_zip_reader_locate_file(&zip, "fex/build", NULL, 0);
+    if (stamp_index >= 0)
+        mz_zip_reader_extract_to_mem(&zip, (mz_uint)stamp_index, want, sizeof(want) - 1, 0);
+    want[strcspn(want, "\r\n")] = '\0';
+    FILE *f = fopen(stamp_path, "rb");
+    if (f) {
+        if (!fgets(have, sizeof(have), f))
+            have[0] = '\0';
+        fclose(f);
+        have[strcspn(have, "\r\n")] = '\0';
+    }
+    if (want[0] && !strcmp(have, want)) {
+        mz_zip_reader_end(&zip);
+        return true;
+    }
+
+    LOG_I("atarivcs: writing FEX of build %s to %s (there: %s)\n", want, root, have[0] ? have : "none");
+    bool ok = true;
+    const mz_uint count = mz_zip_reader_get_num_files(&zip);
+    for (mz_uint i = 0; i < count && ok; i++) {
+        mz_zip_archive_file_stat st;
+        if (!mz_zip_reader_file_stat(&zip, i, &st)) {
+            ok = false;
+            break;
+        }
+        if ((int)i == stamp_index)
+            continue; /* written last, once all the rest is there */
+        char path[PATH_MAX * 2];
+        snprintf(path, sizeof(path), "%s/%s", root, st.m_filename);
+        make_dirs(path);
+        if (st.m_is_directory)
+            continue;
+        const mode_t mode = (mode_t)(st.m_external_attr >> 16);
+        unlink(path);
+        if (S_ISLNK(mode)) {
+            char target[PATH_MAX];
+            const size_t n = (size_t)st.m_uncomp_size < sizeof(target) - 1 ? (size_t)st.m_uncomp_size : sizeof(target) - 1;
+            ok = mz_zip_reader_extract_to_mem(&zip, i, target, n, 0);
+            target[n] = '\0';
+            ok = ok && symlink(target, path) == 0;
+        } else {
+            ok = mz_zip_reader_extract_to_file(&zip, i, path, 0);
+            if (ok && (mode & 0777))
+                chmod(path, mode & 0777);
+        }
+        if (!ok)
+            LOG_E("atarivcs: cannot write %s\n", path);
+    }
+    mz_zip_reader_end(&zip);
+    if (!ok)
+        return false;
+    f = fopen(stamp_path, "wb");
+    if (f) {
+        fprintf(f, "%s\n", want);
+        fclose(f);
+    }
+    return true;
+}
+#endif
 #endif
 
 /* ---- Shared memory ---- */
@@ -573,6 +669,10 @@ bool retro_load_game(const struct retro_game_info *game)
     struct retro_variable var = { "atarivcs_runner", NULL };
     if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
         runner = var.value;
+#if defined(ATARIVCS_EMBEDDED_FEX)
+    if (strcmp(runner, "box64") != 0)
+        install_fex();
+#endif
     bool use_fex = strcmp(runner, "box64") != 0 && find_fex(fex_root, sizeof(fex_root));
     if (!use_fex && !strcmp(runner, "FEX")) {
         LOG_E("atarivcs: x86-64 Emulator is FEX, and FEX is not in system/atarivcs (fex/FEX and fex-rootfs)\n");

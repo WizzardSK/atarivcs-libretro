@@ -29,5 +29,5 @@ block_extract = "true"
 disk_control = "false"
 is_experimental = "true"
 
-notes = "(!) Load the bundle.ini of a game from the Atari VCS (2021) store, unpacked.|(!) The games are Linux x86-64 programs: they run directly on x86-64 Linux, and through FEX (in system/atarivcs) or box64 (from ATARIVCS_BOX64 or PATH) on aarch64 Linux.|(!) No savestates or rewind: the game runs as its own process."
+notes = "(!) Load the bundle.ini of a game from the Atari VCS (2021) store, unpacked.|(!) The games are Linux x86-64 programs: they run directly on x86-64 Linux, and through FEX (carried by the core, written to system/atarivcs) or box64 (from ATARIVCS_BOX64 or PATH) on aarch64 Linux.|(!) No savestates or rewind: the game runs as its own process."
 description = "Plays the native Linux games of the Atari VCS (2021) store in RetroArch. The game runs as its own process with a small library preloaded into it, which hands every frame and its sound to RetroArch and gives it RetroArch's controller as a gamepad, so the games play with any controller or the keyboard."

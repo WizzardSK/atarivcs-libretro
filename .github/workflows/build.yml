@@ -22,7 +22,18 @@ jobs:
       - uses: actions/checkout@v4
       - if: matrix.arch == 'aarch64'
         run: sudo apt-get update -qq && sudo apt-get install -yqq --no-install-recommends gcc-x86-64-linux-gnu libc6-dev-amd64-cross
-      - run: make
+      # aarch64: FEX and its x86-64 libraries carried in the core, which
+      # writes them to system/atarivcs (stamped, so a new build rewrites them)
+      - if: matrix.arch == 'aarch64'
+        run: |
+          python3 scripts/fetch-fex.py fexzip
+          git rev-parse --short HEAD > fexzip/fex/build
+          (cd fexzip && zip -q -r -y -9 "$GITHUB_WORKSPACE/fex.zip" .)
+          ls -la fex.zip
+      - if: matrix.arch == 'aarch64'
+        run: make FEX_ZIP=fex.zip
+      - if: matrix.arch != 'aarch64'
+        run: make
       - run: file atarivcs_libretro.so atarivcs_shim_x86_64.so
       - uses: actions/upload-artifact@v4
         with:
@@ -31,15 +42,3 @@ jobs:
             atarivcs_libretro.so
             atarivcs_shim_x86_64.so
             atarivcs_libretro.info
-      # FEX and its x86-64 libraries for RetroArch's system folder, as a
-      # tarball: an artifact's zip would drop the symlinks and exec bits
-      - if: matrix.arch == 'aarch64'
-        run: |
-          python3 scripts/fetch-fex.py system/atarivcs
-          tar -czf atarivcs-system-aarch64.tar.gz system
-          du -sh system/atarivcs/* atarivcs-system-aarch64.tar.gz
-      - if: matrix.arch == 'aarch64'
-        uses: actions/upload-artifact@v4
-        with:
-          name: atarivcs-system-linux-aarch64
-          path: atarivcs-system-aarch64.tar.gz

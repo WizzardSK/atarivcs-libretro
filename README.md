@@ -17,7 +17,7 @@ What the shim does to the game: it reads the back buffer at each `glXSwapBuffers
 - Put `atarivcs_libretro.so` in RetroArch's cores folder (and `atarivcs_libretro.info` in its info folder). The core carries the x86-64 shim and writes it out for each game; an `atarivcs_shim_x86_64.so` beside the core or in `system/atarivcs/` is taken instead.
 - Load a game's `bundle.ini` (from the unpacked store package).
 - On aarch64 the game runs through FEX or box64, as the core option x86-64 Emulator says (Auto: FEX when it is in the system folder, else box64). FEX ran Breakout Recharged at 26-28 fps in play where box64 managed 16-25 (Chromebook, Snapdragon 7c).
-  - FEX: unpack `atarivcs-system-aarch64.tar.gz` (the CI's aarch64 artifact, made by `scripts/fetch-fex.py`) into RetroArch's folder, which puts `system/atarivcs/fex` (FEX, FEXServer and its GL thunks) and `system/atarivcs/fex-rootfs` (the x86-64 libraries from Debian 12) there. The games' GL goes to the host's driver through FEX's thunk. A RetroArch in flatpak needs `--allow=multiarch`, without which FEX cannot set its personality.
+  - FEX: the aarch64 core built by this repository's CI carries it (about 16 MB), and writes it to `system/atarivcs/fex` (FEX, FEXServer and its GL thunks) and `system/atarivcs/fex-rootfs` (the x86-64 libraries from Debian 12) when a game is loaded and what is there is from another build. `scripts/fetch-fex.py` gets these; `make FEX_ZIP=<zip of them>` builds a core that carries them, a plain `make` one that takes them as they were put there. The games' GL goes to the host's driver through FEX's thunk. A RetroArch in flatpak needs `--allow=multiarch`, without which FEX cannot set its personality.
   - box64 is taken from `ATARIVCS_BOX64`, else `~/.cache/gameflix/box64` (with the x86-64 libraries gameflix sets up beside it), else `PATH`.
 
 ## Controls
@@ -26,8 +26,8 @@ The RetroPad is the game's Xbox 360 layout: B = A, A = B, Y = X, X = Y, L/R = LB
 
 ## Building
 
-`make` builds the x86-64 shim and the core with the shim inside it. On a host other than x86-64 the shim needs an x86-64 cross compiler (`SHIM_CC`, by default `x86_64-linux-gnu-gcc`; Debian and Ubuntu: `gcc-x86-64-linux-gnu`). `.gitlab-ci.yml` is the libretro buildbot's recipe (Linux x86-64 and aarch64).
+`make` builds the x86-64 shim and the core with the shim inside it (`FEX_ZIP=`, see Use: FEX inside it too). On a host other than x86-64 the shim needs an x86-64 cross compiler (`SHIM_CC`, by default `x86_64-linux-gnu-gcc`; Debian and Ubuntu: `gcc-x86-64-linux-gnu`). `.gitlab-ci.yml` is the libretro buildbot's recipe (Linux x86-64 and aarch64).
 
 ## License
 
-MIT, see LICENSE. src/libretro.h is the libretro API header, MIT too (The RetroArch team).
+MIT, see LICENSE. src/libretro.h is the libretro API header, MIT too (The RetroArch team). src/miniz is miniz, MIT (src/miniz/LICENSE). The FEX the aarch64 core carries is FEX-Emu's own build from its Ubuntu PPA (MIT), and its x86-64 libraries are Debian 12's packages unchanged, under their own licenses (glibc and OpenAL LGPL, SDL2 zlib, the X11 libraries MIT); their sources are Debian's, for the versions `scripts/fetch-fex.py` took.
