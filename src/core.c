@@ -90,16 +90,21 @@ void retro_set_environment(retro_environment_t cb)
         log_cb = logging.log;
     bool no_game = false;
     cb(RETRO_ENVIRONMENT_SET_SUPPORT_NO_GAME, &no_game);
-#if !defined(__x86_64__)
-    /* What runs the x86-64 game here. FEX ran Breakout Recharged at 26-28
-     * fps in play where box64 managed 16-25 (Chromebook, Adreno 618), so
-     * Auto takes FEX whenever its files are in system/atarivcs */
+    /* Game Resolution: the screen the game is told it has (shim.c), which
+     * games that take the desktop's resolution (Unity's "Use Native") draw
+     * at - and the shim reads back, a cost on every frame: 960x540 halves
+     * it. Taken when a game starts.
+     * x86-64 Emulator (not on x86-64): what runs the game. FEX ran Breakout
+     * Recharged at 26-28 fps in play where box64 managed 16-25 (Chromebook,
+     * Adreno 618), so Auto takes FEX whenever it is there */
     static const struct retro_variable vars[] = {
-        { "atarivcs_runner", "x86-64 Emulator; Auto|FEX|box64" },
+        { "atarivcs_resolution", "Game Resolution (next start); 1280x720|960x540|854x480|1920x1080" },
+#if !defined(__x86_64__)
+        { "atarivcs_runner", "x86-64 Emulator (next start); Auto|FEX|box64" },
+#endif
         { NULL, NULL },
     };
     cb(RETRO_ENVIRONMENT_SET_VARIABLES, (void *)vars);
-#endif
 }
 void retro_set_video_refresh(retro_video_refresh_t cb) { video_cb = cb; }
 void retro_set_audio_sample(retro_audio_sample_t cb) { (void)cb; }
@@ -747,6 +752,18 @@ bool retro_load_game(const struct retro_game_info *game)
         }
     }
 
+    /* Game Resolution (retro_set_environment): the screen the game is told */
+    char screen[32] = "1280x720";
+    {
+        struct retro_variable res = { "atarivcs_resolution", NULL };
+        unsigned sw, sh;
+        if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &res) && res.value &&
+            sscanf(res.value, "%ux%u", &sw, &sh) == 2 && sw && sh &&
+            sw <= ATARIVCS_MAX_WIDTH && sh <= ATARIVCS_MAX_HEIGHT)
+            snprintf(screen, sizeof(screen), "%ux%u", sw, sh);
+        LOG_I("atarivcs: the game is told its screen is %s\n", screen);
+    }
+
     child = fork();
     if (child < 0) {
         LOG_E("atarivcs: fork: %s\n", strerror(errno));
@@ -777,9 +794,9 @@ bool retro_load_game(const struct retro_game_info *game)
          * (an Atari controller paired with it, for Rewired) */
         if (access("/tmp/atarivcs-real-pads", F_OK) != 0)
             setenv("ATARIVCS_FAKE_UDEV", "1", 1);
-        /* A 1280x720 display for the game (shim.c): drawn and read back at
-         * 1080p, Breakout Recharged ran at 13 fps under box64 */
-        setenv("ATARIVCS_SCREEN", "1280x720", 1);
+        /* The display the game is told (shim.c), Game Resolution: drawn and
+         * read back at 1080p, Breakout Recharged ran at 13 fps under box64 */
+        setenv("ATARIVCS_SCREEN", screen, 1);
         /* Debugging: the game's own window shown too */
         if (access("/tmp/atarivcs-show-window", F_OK) == 0)
             setenv("ATARIVCS_SHOW_WINDOW", "1", 1);
