@@ -100,6 +100,21 @@ typedef int GLsizei;
 #define GLX_WIDTH 0x801D
 #define GLX_HEIGHT 0x801E
 
+#define GL_STREAM_READ 0x88E1
+#define GL_MAP_READ_BIT 0x0001
+
+/* The frame handed over: rows bottom up as glReadPixels gives them, under
+ * the frame_seq protocol (shared.h) */
+static void publish(const void *pixels, unsigned int w, unsigned int h)
+{
+    __atomic_add_fetch(&shared->frame_seq, 1, __ATOMIC_ACQ_REL); /* odd: writing */
+    if (pixels)
+        memcpy(shared->pixels, pixels, (size_t)w * h * 4);
+    shared->width = w;
+    shared->height = h;
+    __atomic_add_fetch(&shared->frame_seq, 1, __ATOMIC_ACQ_REL); /* even: done */
+}
+
 static void capture(void *dpy, unsigned long drawable)
 {
     static void (*query)(void *, unsigned long, int, unsigned int *);
@@ -109,7 +124,12 @@ static void capture(void *dpy, unsigned long drawable)
     static void (*read_pixels)(GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void *);
     static void (*bind_buffer)(GLenum, unsigned int);
     static void (*bind_framebuffer)(GLenum, unsigned int);
-    static int resolved;
+    static void (*gen_buffers)(GLsizei, unsigned int *);
+    static void (*buffer_data)(GLenum, intptr_t, const void *, GLenum);
+    static void *(*map_range)(GLenum, intptr_t, intptr_t, unsigned int);
+    static unsigned char (*unmap)(GLenum);
+    static void *(*current_context)(void);
+    static int resolved, sync_read;
 
     if (!shared)
         return;
@@ -120,11 +140,23 @@ static void capture(void *dpy, unsigned long drawable)
         read_buffer = lookup(gl_lib, "glReadBuffer");
         pixel_storei = lookup(gl_lib, "glPixelStorei");
         read_pixels = lookup(gl_lib, "glReadPixels");
+        current_context = lookup(gl_lib, "glXGetCurrentContext");
         void *(*proc)(const unsigned char *) = lookup(gl_lib, "glXGetProcAddress");
         if (proc) {
             bind_buffer = proc((const unsigned char *)"glBindBuffer");
             bind_framebuffer = proc((const unsigned char *)"glBindFramebuffer");
+            gen_buffers = proc((const unsigned char *)"glGenBuffers");
+            buffer_data = proc((const unsigned char *)"glBufferData");
+            map_range = proc((const unsigned char *)"glMapBufferRange");
+            unmap = proc((const unsigned char *)"glUnmapBuffer");
         }
+        /* ATARIVCS_SYNC_READ=1: each frame read and waited for at its own
+         * swap, as before the pixel buffers (comparison runs) */
+        const char *v = getenv("ATARIVCS_SYNC_READ");
+        sync_read = (v && *v == '1') || !bind_buffer || !gen_buffers || !buffer_data ||
+                    !map_range || !unmap || !current_context;
+        fprintf(stderr, "atarivcs shim: frames read %s\n",
+                sync_read ? "at their swap (synchronous)" : "through two pixel buffers, a frame late");
     }
     if (!query || !get_integerv || !read_buffer || !pixel_storei || !read_pixels)
         return;
@@ -134,6 +166,9 @@ static void capture(void *dpy, unsigned long drawable)
     query(dpy, drawable, GLX_HEIGHT, &h);
     if (!w || !h || w > ATARIVCS_MAX_WIDTH || h > ATARIVCS_MAX_HEIGHT)
         return;
+
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
 
     /* What the game had set, put back after */
     GLint read_buf = 0, align = 4, row = 0, skip_rows = 0, skip_pixels = 0, pbo = 0, read_fbo = 0;
@@ -157,28 +192,77 @@ static void capture(void *dpy, unsigned long drawable)
     pixel_storei(GL_PACK_SKIP_ROWS, 0);
     pixel_storei(GL_PACK_SKIP_PIXELS, 0);
 
-    __atomic_add_fetch(&shared->frame_seq, 1, __ATOMIC_ACQ_REL); /* odd: writing */
-    read_pixels(0, 0, (GLsizei)w, (GLsizei)h, GL_BGRA, GL_UNSIGNED_BYTE, shared->pixels);
-    shared->width = w;
-    shared->height = h;
-    __atomic_add_fetch(&shared->frame_seq, 1, __ATOMIC_ACQ_REL); /* even: done */
+    if (sync_read) {
+        /* glReadPixels waits for the GPU to finish the frame, and the game
+         * with it: on the Chromebook a costly stall at 720p */
+        __atomic_add_fetch(&shared->frame_seq, 1, __ATOMIC_ACQ_REL);
+        read_pixels(0, 0, (GLsizei)w, (GLsizei)h, GL_BGRA, GL_UNSIGNED_BYTE, shared->pixels);
+        shared->width = w;
+        shared->height = h;
+        __atomic_add_fetch(&shared->frame_seq, 1, __ATOMIC_ACQ_REL);
+    } else {
+        /* Two pixel buffers: this frame's read is only started, into one,
+         * and the last frame's, finished by now, is copied out of the
+         * other. The game goes on without waiting for the GPU; RetroArch
+         * shows each frame one swap later. The buffers belong to the
+         * context they were made in: made again for a new context, and for
+         * a new size. */
+        static unsigned int bufs[2];
+        static unsigned int buf_w[2], buf_h[2];
+        static int filled[2], next_buf;
+        static void *ctx;
+        void *now_ctx = current_context();
+        if (now_ctx != ctx) {
+            ctx = now_ctx;
+            gen_buffers(2, bufs);
+            buf_w[0] = buf_w[1] = buf_h[0] = buf_h[1] = 0;
+            filled[0] = filled[1] = 0;
+        }
+        const int cur = next_buf, prev = next_buf ^ 1;
+        bind_buffer(GL_PIXEL_PACK_BUFFER, bufs[cur]);
+        if (buf_w[cur] != w || buf_h[cur] != h) {
+            buffer_data(GL_PIXEL_PACK_BUFFER, (intptr_t)w * h * 4, NULL, GL_STREAM_READ);
+            buf_w[cur] = w;
+            buf_h[cur] = h;
+        }
+        read_pixels(0, 0, (GLsizei)w, (GLsizei)h, GL_BGRA, GL_UNSIGNED_BYTE, NULL);
+        filled[cur] = 1;
+        if (filled[prev]) {
+            bind_buffer(GL_PIXEL_PACK_BUFFER, bufs[prev]);
+            const size_t size = (size_t)buf_w[prev] * buf_h[prev] * 4;
+            const void *p = map_range(GL_PIXEL_PACK_BUFFER, 0, (intptr_t)size, GL_MAP_READ_BIT);
+            if (p) {
+                publish(p, buf_w[prev], buf_h[prev]);
+                unmap(GL_PIXEL_PACK_BUFFER);
+            }
+            filled[prev] = 0;
+        }
+        bind_buffer(GL_PIXEL_PACK_BUFFER, 0);
+        next_buf = prev;
+    }
 
-    /* Every two seconds or so: what the reads give */
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    static double capture_ms;
+    capture_ms += (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6;
+
+    /* Every two seconds or so: what the reads give, and what they cost */
     static unsigned swaps;
     if (++swaps % 120 == 1) {
         static GLenum (*get_error)(void);
         if (!get_error)
             get_error = lookup(gl_lib, "glGetError");
         unsigned nonzero = 0;
-        for (size_t i = 0; i < (size_t)w * h * 4; i += 4093)
+        for (size_t i = 0; i < (size_t)shared->width * shared->height * 4; i += 4093)
             nonzero += shared->pixels[i] != 0;
         struct timespec now;
         clock_gettime(CLOCK_MONOTONIC, &now);
         static double last;
         const double t = now.tv_sec + now.tv_nsec / 1e9;
-        fprintf(stderr, "atarivcs shim: swap %u, %ux%u, %.1f fps, read buffer was 0x%x, fbo %d, error 0x%x, nonzero samples %u\n",
-                swaps, w, h, last ? 120.0 / (t - last) : 0.0, (unsigned)read_buf, read_fbo, get_error ? get_error() : 0u, nonzero);
+        fprintf(stderr, "atarivcs shim: swap %u, %ux%u, %.1f fps, reading %.2f ms a frame, read buffer was 0x%x, fbo %d, error 0x%x, nonzero samples %u\n",
+                swaps, w, h, last ? 120.0 / (t - last) : 0.0, swaps > 1 ? capture_ms / 120.0 : capture_ms,
+                (unsigned)read_buf, read_fbo, get_error ? get_error() : 0u, nonzero);
         last = t;
+        capture_ms = 0;
     }
 
     read_buffer((GLenum)read_buf);
